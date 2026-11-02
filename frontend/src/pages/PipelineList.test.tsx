@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,485 +15,847 @@
  */
 
 import * as React from 'react';
-import PipelineList from './PipelineList';
-import TestUtils from '../TestUtils';
-import { ApiPipeline } from '../apis/pipeline';
-import { Apis } from '../lib/Apis';
-import { PageProps } from './Page';
-import { RoutePage, RouteParams } from '../components/Router';
-import { shallow, ReactWrapper, ShallowWrapper } from 'enzyme';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { range } from 'lodash';
-import { ImportMethod } from '../components/UploadPipelineDialog';
+import { RoutePage, RouteParams } from 'src/components/Router';
+import { Apis } from 'src/lib/Apis';
+import { ButtonKeys } from 'src/lib/Buttons';
+import TestUtils, { flushPromisesInAct } from 'src/TestUtils';
+import { PageProps } from './Page';
+import PipelineList from './PipelineList';
+import { CommonTestWrapper } from 'src/TestWrapper';
+import { ExpandState } from 'src/components/CustomTable';
+import { vi } from 'vitest';
 
 describe('PipelineList', () => {
+  let renderResult: ReturnType<typeof render> | null = null;
+  let pipelineListRef: React.RefObject<PipelineList> | null = null;
 
-  let tree: ReactWrapper | ShallowWrapper;
+  let updateBannerSpy: ReturnType<typeof vi.fn>;
+  let updateDialogSpy: ReturnType<typeof vi.fn>;
+  let updateSnackbarSpy: ReturnType<typeof vi.fn>;
+  let updateToolbarSpy: ReturnType<typeof vi.fn>;
+  let listPipelinesSpy: ReturnType<typeof vi.spyOn>;
+  let listPipelineVersionsSpy: ReturnType<typeof vi.spyOn>;
+  let deletePipelineSpy: ReturnType<typeof vi.spyOn>;
+  let deletePipelineVersionSpy: ReturnType<typeof vi.spyOn>;
 
-  const updateBannerSpy = jest.fn();
-  const updateDialogSpy = jest.fn();
-  const updateSnackbarSpy = jest.fn();
-  const updateToolbarSpy = jest.fn();
-  const listPipelinesSpy = jest.spyOn(Apis.pipelineServiceApi, 'listPipelines');
-  const createPipelineSpy = jest.spyOn(Apis.pipelineServiceApi, 'createPipeline');
-  const deletePipelineSpy = jest.spyOn(Apis.pipelineServiceApi, 'deletePipeline');
-  const uploadPipelineSpy = jest.spyOn(Apis, 'uploadPipeline');
-
-  function generateProps(): PageProps {
-    return {
-      history: {} as any,
-      location: '' as any,
-      match: '' as any,
-      toolbarProps: PipelineList.prototype.getInitialToolbarState(),
-      updateBanner: updateBannerSpy,
-      updateDialog: updateDialogSpy,
-      updateSnackbar: updateSnackbarSpy,
-      updateToolbar: updateToolbarSpy,
-    };
+  function spyInit() {
+    updateBannerSpy = vi.fn();
+    updateDialogSpy = vi.fn();
+    updateSnackbarSpy = vi.fn();
+    updateToolbarSpy = vi.fn();
+    listPipelinesSpy = vi
+      .spyOn(Apis.pipelineServiceApiV2, 'listPipelines')
+      .mockResolvedValue({ pipelines: [] });
+    listPipelineVersionsSpy = vi
+      .spyOn(Apis.pipelineServiceApiV2, 'listPipelineVersions')
+      .mockResolvedValue({ pipeline_versions: [] });
+    deletePipelineSpy = vi
+      .spyOn(Apis.pipelineServiceApiV2, 'deletePipeline')
+      .mockResolvedValue(undefined as any);
+    deletePipelineVersionSpy = vi
+      .spyOn(Apis.pipelineServiceApiV2, 'deletePipelineVersion')
+      .mockResolvedValue(undefined as any);
   }
 
-  async function mountWithNPipelines(n: number): Promise<ReactWrapper> {
-    listPipelinesSpy.mockImplementationOnce(() => ({
-      pipelines: range(n).map(i => ({ id: 'test-pipeline-id' + i, name: 'test pipeline name' + i })),
-    }));
-    tree = TestUtils.mountWithRouter(<PipelineList {...generateProps()} />);
-    await listPipelinesSpy;
-    await TestUtils.flushPromises();
-    tree.update(); // Make sure the tree is updated before returning it
-    return tree;
+  function generateProps(): PageProps {
+    return TestUtils.generatePageProps(
+      PipelineList,
+      '' as any,
+      '' as any,
+      null,
+      updateBannerSpy,
+      updateDialogSpy,
+      updateToolbarSpy,
+      updateSnackbarSpy,
+    );
+  }
+
+  function getPipelineListState(): PipelineList['state'] | undefined {
+    return pipelineListRef?.current?.state;
+  }
+
+  function getToolbarAction(key: string, callIndex?: number) {
+    const calls = updateToolbarSpy.mock.calls;
+    if (!calls.length) {
+      throw new Error(`Toolbar action not available: ${key}`);
+    }
+    if (callIndex !== undefined) {
+      return calls[callIndex][0].actions[key];
+    }
+    for (let i = calls.length - 1; i >= 0; i--) {
+      const action = calls[i][0]?.actions?.[key];
+      if (action && action.disabled !== true) {
+        return action;
+      }
+    }
+    return calls[calls.length - 1][0].actions[key];
+  }
+
+  function getToolbarActionFromInstance(key: string) {
+    if (!pipelineListRef?.current) {
+      throw new Error(`PipelineList instance not available for ${key}`);
+    }
+    return pipelineListRef.current.getInitialToolbarState().actions[key];
+  }
+
+  function getRowById(id: string): HTMLElement {
+    const rows = screen.getAllByTestId('table-row');
+    const row = rows.find((element) => element.getAttribute('data-row-id') === id);
+    if (!row) {
+      throw new Error(`Row not found: ${id}`);
+    }
+    return row;
+  }
+
+  async function waitForRowById(id: string): Promise<HTMLElement> {
+    let row: HTMLElement | null = null;
+    await waitFor(() => {
+      row = getRowById(id);
+      expect(row).toBeTruthy();
+    });
+    return row as HTMLElement;
+  }
+
+  async function waitForSelectedPipelines(ids: string[]): Promise<void> {
+    await waitFor(() => {
+      const selected = getPipelineListState()?.selectedIds || [];
+      expect(selected.slice().sort()).toEqual(ids.slice().sort());
+    });
+  }
+
+  async function selectPipeline(id: string): Promise<void> {
+    const row = await waitForRowById(id);
+    await userEvent.click(row);
+    await waitForSelectedPipelines([id]);
+  }
+
+  async function selectPipelines(ids: string[]): Promise<void> {
+    for (const id of ids) {
+      const row = await waitForRowById(id);
+      await userEvent.click(row);
+    }
+    await waitForSelectedPipelines(ids);
+  }
+
+  async function deselectPipeline(id: string): Promise<void> {
+    const row = await waitForRowById(id);
+    await userEvent.click(row);
+    await waitForSelectedPipelines([]);
+  }
+
+  async function selectPipelineVersion(
+    pipelineId: string,
+    pipelineVersionId: string,
+  ): Promise<void> {
+    const row = await waitForRowById(pipelineVersionId);
+    await userEvent.click(row);
+    await waitFor(() => {
+      expect(getPipelineListState()).toHaveProperty('selectedVersionIds');
+      expect(getPipelineListState()!.selectedVersionIds[pipelineId]).toEqual([pipelineVersionId]);
+    });
+  }
+
+  async function openDeleteDialog(): Promise<any> {
+    const deleteBtn = getToolbarActionFromInstance(ButtonKeys.DELETE_RUN);
+    await act(async () => {
+      await deleteBtn.action();
+    });
+    await waitFor(() => {
+      expect(updateDialogSpy).toHaveBeenCalled();
+    });
+    return updateDialogSpy.mock.calls[updateDialogSpy.mock.calls.length - 1][0];
+  }
+
+  async function renderPipelineList(options?: {
+    namespace?: string;
+    props?: Partial<PageProps>;
+  }): Promise<void> {
+    pipelineListRef = React.createRef<PipelineList>();
+    const props = { ...generateProps(), ...options?.props } as PageProps;
+    renderResult = render(
+      <CommonTestWrapper>
+        <PipelineList ref={pipelineListRef} {...props} namespace={options?.namespace} />
+      </CommonTestWrapper>,
+    );
+    await flushPromisesInAct();
+    await waitForPipelinesLoad();
+  }
+
+  async function waitForPipelinesLoad(): Promise<void> {
+    await waitFor(() => {
+      expect(listPipelinesSpy).toHaveBeenCalled();
+    });
+    await flushPromisesInAct();
+  }
+
+  async function mountWithNPipelines(n: number, options?: { namespace?: string }) {
+    listPipelinesSpy.mockResolvedValue({
+      pipelines: range(n).map((i) => ({
+        id: 'test-pipeline-id' + i,
+        pipeline_id: 'test-pipeline-id' + i,
+        display_name: 'test pipeline name' + i,
+        name: 'test-pipeline-name' + i,
+      })),
+    });
+    await renderPipelineList({ namespace: options?.namespace });
+    await waitForPipelinesLoad();
   }
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    spyInit();
   });
 
   afterEach(() => {
-    jest.resetAllMocks();
-    tree.unmount();
+    pipelineListRef = null;
+    vi.resetAllMocks();
   });
 
-  it('renders an empty list with empty state message', () => {
-    tree = shallow(<PipelineList {...generateProps()} />);
-    expect(tree).toMatchSnapshot();
+  it('opens namespace transfer from the accessible More actions menu', async () => {
+    await renderPipelineList();
+    const trigger = screen.getByRole('button', { name: 'More actions' });
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('menuitem')).not.toBeInTheDocument();
+    await userEvent.click(trigger);
+    expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    const item = screen.getByRole('menuitem', { name: 'Import / export namespace data…' });
+    expect(item).toHaveAttribute('href', RoutePage.METADATA_TRANSFER);
+    await userEvent.click(item);
+    await waitFor(() => expect(screen.queryByRole('menuitem')).not.toBeInTheDocument());
+  });
+
+  it('closes More actions with Escape and returns focus to its trigger', async () => {
+    await renderPipelineList();
+    const trigger = screen.getByRole('button', { name: 'More actions' });
+    await userEvent.click(trigger);
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('menuitem')).not.toBeInTheDocument());
+    expect(trigger).toHaveFocus();
+  });
+
+  it('renders an empty list with empty state message', async () => {
+    await renderPipelineList();
+    await waitForPipelinesLoad();
+    expect(
+      screen.getByText('No pipelines found. Click "Upload pipeline" to start.'),
+    ).toBeInTheDocument();
   });
 
   it('renders a list of one pipeline', async () => {
-    tree = shallow(<PipelineList {...generateProps()} />);
-    tree.setState({
-      pipelines: [{
-        created_at: new Date(2018, 8, 22, 11, 5, 48),
-        description: 'test pipeline description',
-        name: 'pipeline1',
-        parameters: [],
-      } as ApiPipeline]
+    listPipelinesSpy.mockResolvedValue({
+      pipelines: [
+        {
+          created_at: new Date(2018, 8, 22, 11, 5, 48),
+          description: 'test pipeline description',
+          display_name: 'pipeline1',
+          name: 'pipeline1',
+          parameters: [],
+        },
+      ],
     });
-    await listPipelinesSpy;
-    expect(tree).toMatchSnapshot();
+    await renderPipelineList();
+    await waitForPipelinesLoad();
+    expect(screen.getByText('pipeline1')).toBeInTheDocument();
   });
 
   it('renders a list of one pipeline with no description or created date', async () => {
-    tree = shallow(<PipelineList {...generateProps()} />);
-    tree.setState({
-      pipelines: [{
-        name: 'pipeline1',
-        parameters: [],
-      } as ApiPipeline]
+    listPipelinesSpy.mockResolvedValue({
+      pipelines: [
+        {
+          display_name: 'pipeline1',
+          name: 'pipeline1',
+          parameters: [],
+        },
+      ],
     });
-    await listPipelinesSpy;
-    expect(tree).toMatchSnapshot();
+    await renderPipelineList();
+    await waitForPipelinesLoad();
+    expect(screen.getByText('pipeline1')).toBeInTheDocument();
+  });
+
+  it('renders a list of one pipeline with a display name that is not the same as the name', async () => {
+    listPipelinesSpy.mockResolvedValue({
+      pipelines: [
+        {
+          display_name: 'Pipeline One',
+          name: 'pipeline1',
+          parameters: [],
+        },
+      ],
+    });
+    await renderPipelineList();
+    await waitForPipelinesLoad();
+    expect(screen.getByText('Pipeline One')).toBeInTheDocument();
   });
 
   it('renders a list of one pipeline with error', async () => {
-    tree = shallow(<PipelineList {...generateProps()} />);
-    tree.setState({
-      pipelines: [{
-        created_at: new Date(2018, 8, 22, 11, 5, 48),
-        description: 'test pipeline description',
-        error: 'oops! could not load pipeline',
-        name: 'pipeline1',
-        parameters: [],
-      } as ApiPipeline]
+    listPipelinesSpy.mockResolvedValue({
+      pipelines: [
+        {
+          created_at: new Date(2018, 8, 22, 11, 5, 48),
+          description: 'test pipeline description',
+          error: 'oops! could not load pipeline',
+          display_name: 'pipeline1',
+          name: 'pipeline1',
+          parameters: [],
+        } as any,
+      ],
     });
-    await listPipelinesSpy;
-    expect(tree).toMatchSnapshot();
+    await renderPipelineList();
+    await waitForPipelinesLoad();
+    expect(screen.getByText('pipeline1')).toBeInTheDocument();
   });
 
   it('calls Apis to list pipelines, sorted by creation time in descending order', async () => {
-    listPipelinesSpy.mockImplementationOnce(() => ({ pipelines: [{ name: 'pipeline1' }] }));
-    tree = TestUtils.mountWithRouter(<PipelineList {...generateProps()} />);
-    await listPipelinesSpy;
-    expect(listPipelinesSpy).toHaveBeenLastCalledWith('', 10, 'created_at desc', '');
-    expect(tree.state()).toHaveProperty('pipelines', [{ name: 'pipeline1' }]);
+    listPipelinesSpy.mockResolvedValue({
+      pipelines: [{ display_name: 'pipeline1', name: 'pipeline1' }],
+    });
+    await renderPipelineList({ namespace: 'test-ns' });
+    await waitForPipelinesLoad();
+    expect(listPipelinesSpy).toHaveBeenLastCalledWith('test-ns', '', 10, 'created_at desc', '');
+    expect(getPipelineListState()).toHaveProperty('displayPipelines', [
+      { expandState: ExpandState.COLLAPSED, display_name: 'pipeline1', name: 'pipeline1' },
+    ]);
   });
 
   it('has a Refresh button, clicking it refreshes the pipeline list', async () => {
-    tree = await mountWithNPipelines(1);
-    const instance = tree.instance() as PipelineList;
-    expect(listPipelinesSpy.mock.calls.length).toBe(1);
-    const refreshBtn = instance.getInitialToolbarState().actions.find(b => b.title === 'Refresh');
+    await mountWithNPipelines(1, { namespace: 'test-ns' });
+    listPipelinesSpy.mockClear();
+    const refreshBtn = getToolbarActionFromInstance(ButtonKeys.REFRESH);
     expect(refreshBtn).toBeDefined();
-    await refreshBtn!.action();
-    expect(listPipelinesSpy.mock.calls.length).toBe(2);
-    expect(listPipelinesSpy).toHaveBeenLastCalledWith('', 10, 'created_at desc', '');
+    await act(async () => {
+      await refreshBtn.action();
+    });
+    await waitFor(() => {
+      expect(listPipelinesSpy).toHaveBeenCalledTimes(1);
+    });
+    expect(listPipelinesSpy).toHaveBeenLastCalledWith('test-ns', '', 10, 'created_at desc', '');
     expect(updateBannerSpy).toHaveBeenLastCalledWith({});
   });
 
   it('shows error banner when listing pipelines fails', async () => {
-    TestUtils.makeErrorResponseOnce(listPipelinesSpy, 'bad stuff happened');
-    tree = TestUtils.mountWithRouter(<PipelineList {...generateProps()} />);
-    await listPipelinesSpy;
-    await TestUtils.flushPromises();
-    expect(updateBannerSpy).toHaveBeenLastCalledWith(expect.objectContaining({
-      additionalInfo: 'bad stuff happened',
-      message: 'Error: failed to retrieve list of pipelines. Click Details for more information.',
-      mode: 'error',
-    }));
+    TestUtils.makeErrorResponseOnce(listPipelinesSpy as any, 'bad stuff happened');
+    await renderPipelineList();
+    await waitFor(() => {
+      expect(updateBannerSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          additionalInfo: 'bad stuff happened',
+          message:
+            'Error: failed to retrieve list of pipelines. Click Details for more information.',
+          mode: 'error',
+        }),
+      );
+    });
   });
 
   it('shows error banner when listing pipelines fails after refresh', async () => {
-    tree = TestUtils.mountWithRouter(<PipelineList {...generateProps()} />);
-    const instance = tree.instance() as PipelineList;
-    const refreshBtn = instance.getInitialToolbarState().actions.find(b => b.title === 'Refresh');
+    await renderPipelineList();
+    await waitForPipelinesLoad();
+    listPipelinesSpy.mockClear();
+    const refreshBtn = getToolbarActionFromInstance(ButtonKeys.REFRESH);
     expect(refreshBtn).toBeDefined();
-    TestUtils.makeErrorResponseOnce(listPipelinesSpy, 'bad stuff happened');
-    await refreshBtn!.action();
-    expect(listPipelinesSpy.mock.calls.length).toBe(2);
-    expect(listPipelinesSpy).toHaveBeenLastCalledWith('', 10, 'created_at desc', '');
-    expect(updateBannerSpy).toHaveBeenLastCalledWith(expect.objectContaining({
-      additionalInfo: 'bad stuff happened',
-      message: 'Error: failed to retrieve list of pipelines. Click Details for more information.',
-      mode: 'error',
-    }));
+    TestUtils.makeErrorResponseOnce(listPipelinesSpy as any, 'bad stuff happened');
+    await act(async () => {
+      await refreshBtn.action();
+    });
+    await waitFor(() => {
+      expect(listPipelinesSpy).toHaveBeenCalledTimes(1);
+    });
+    expect(listPipelinesSpy).toHaveBeenLastCalledWith(undefined, '', 10, 'created_at desc', '');
+    expect(updateBannerSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        additionalInfo: 'bad stuff happened',
+        message: 'Error: failed to retrieve list of pipelines. Click Details for more information.',
+        mode: 'error',
+      }),
+    );
   });
 
   it('hides error banner when listing pipelines fails then succeeds', async () => {
-    TestUtils.makeErrorResponseOnce(listPipelinesSpy, 'bad stuff happened');
-    tree = TestUtils.mountWithRouter(<PipelineList {...generateProps()} />);
-    const instance = tree.instance() as PipelineList;
-    await listPipelinesSpy;
-    await TestUtils.flushPromises();
-    expect(updateBannerSpy).toHaveBeenLastCalledWith(expect.objectContaining({
-      additionalInfo: 'bad stuff happened',
-      message: 'Error: failed to retrieve list of pipelines. Click Details for more information.',
-      mode: 'error',
-    }));
+    TestUtils.makeErrorResponseOnce(listPipelinesSpy as any, 'bad stuff happened');
+    await renderPipelineList();
+    await waitFor(() => {
+      expect(updateBannerSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          additionalInfo: 'bad stuff happened',
+          message:
+            'Error: failed to retrieve list of pipelines. Click Details for more information.',
+          mode: 'error',
+        }),
+      );
+    });
     updateBannerSpy.mockReset();
+    listPipelinesSpy.mockClear();
 
-    const refreshBtn = instance.getInitialToolbarState().actions.find(b => b.title === 'Refresh');
-    listPipelinesSpy.mockImplementationOnce(() => ({ pipelines: [{ name: 'pipeline1' }] }));
-    await refreshBtn!.action();
-    expect(listPipelinesSpy.mock.calls.length).toBe(2);
+    const refreshBtn = getToolbarActionFromInstance(ButtonKeys.REFRESH);
+    listPipelinesSpy.mockResolvedValueOnce({
+      pipelines: [{ display_name: 'pipeline1', name: 'pipeline1' }],
+    });
+    await act(async () => {
+      await refreshBtn.action();
+    });
+    await waitFor(() => {
+      expect(listPipelinesSpy).toHaveBeenCalledTimes(1);
+    });
     expect(updateBannerSpy).toHaveBeenLastCalledWith({});
   });
 
   it('renders pipeline names as links to their details pages', async () => {
-    tree = await mountWithNPipelines(1);
-    const link = tree.find('a[children="test pipeline name0"]');
-    expect(link).toHaveLength(1);
-    expect(link.prop('href')).toBe(RoutePage.PIPELINE_DETAILS.replace(
-      ':' + RouteParams.pipelineId + '?', 'test-pipeline-id0'
-    ));
+    await mountWithNPipelines(1);
+    const row = await waitForRowById('test-pipeline-id0');
+    const link = within(row).getByRole('link');
+    expect(link).toHaveTextContent('test pipeline name0');
+    expect(link.getAttribute('href')).toBe(
+      RoutePage.PIPELINE_DETAILS_NO_VERSION.replace(
+        ':' + RouteParams.pipelineId + '?',
+        'test-pipeline-id0',
+      ),
+    );
   });
 
   it('always has upload pipeline button enabled', async () => {
-    tree = await mountWithNPipelines(1);
-    const calls = updateToolbarSpy.mock.calls[0];
-    expect(calls[0].actions.find((b: any) => b.title === 'Upload pipeline')).not.toHaveProperty('disabled');
+    await mountWithNPipelines(1);
+    expect(getToolbarAction(ButtonKeys.NEW_PIPELINE_VERSION).disabled).not.toBe(true);
   });
 
   it('enables delete button when one pipeline is selected', async () => {
-    tree = await mountWithNPipelines(1);
-    tree.find('.tableRow').simulate('click');
-    expect(updateToolbarSpy.mock.calls).toHaveLength(2); // Initial call, then selection update
-    const calls = updateToolbarSpy.mock.calls[1];
-    expect(calls[0].actions.find((b: any) => b.title === 'Delete')).toHaveProperty('disabled', false);
+    await mountWithNPipelines(1);
+    await selectPipeline('test-pipeline-id0');
+    await waitFor(() => {
+      expect(getToolbarAction(ButtonKeys.DELETE_RUN).disabled).toBe(false);
+    });
   });
 
   it('enables delete button when two pipelines are selected', async () => {
-    tree = await mountWithNPipelines(2);
-    tree.find('.tableRow').at(0).simulate('click');
-    tree.find('.tableRow').at(1).simulate('click');
-    expect(updateToolbarSpy.mock.calls).toHaveLength(3); // Initial call, then selection updates
-    const calls = updateToolbarSpy.mock.calls[2];
-    expect(calls[0].actions.find((b: any) => b.title === 'Delete')).toHaveProperty('disabled', false);
+    await mountWithNPipelines(2);
+    await selectPipelines(['test-pipeline-id0', 'test-pipeline-id1']);
+    await waitFor(() => {
+      expect(getToolbarAction(ButtonKeys.DELETE_RUN).disabled).toBe(false);
+    });
   });
 
   it('re-disables delete button pipelines are unselected', async () => {
-    tree = await mountWithNPipelines(1);
-    tree.find('.tableRow').at(0).simulate('click');
-    tree.find('.tableRow').at(0).simulate('click');
-    expect(updateToolbarSpy.mock.calls).toHaveLength(3); // Initial call, then selection updates
-    const calls = updateToolbarSpy.mock.calls[2];
-    expect(calls[0].actions.find((b: any) => b.title === 'Delete')).toHaveProperty('disabled', true);
+    await mountWithNPipelines(1);
+    await selectPipeline('test-pipeline-id0');
+    await deselectPipeline('test-pipeline-id0');
+    await waitFor(() => {
+      expect(getToolbarAction(ButtonKeys.DELETE_RUN).disabled).toBe(true);
+    });
   });
 
   it('shows delete dialog when delete button is clicked', async () => {
-    tree = await mountWithNPipelines(1);
-    tree.find('.tableRow').at(0).simulate('click');
-    const deleteBtn = (tree.instance() as PipelineList)
-      .getInitialToolbarState().actions.find(b => b.title === 'Delete');
-    await deleteBtn!.action();
-    const call = updateDialogSpy.mock.calls[0][0];
+    await mountWithNPipelines(1);
+    await selectPipeline('test-pipeline-id0');
+    const call = await openDeleteDialog();
     expect(call).toHaveProperty('title', 'Delete 1 pipeline?');
   });
 
   it('shows delete dialog when delete button is clicked, indicating several pipelines to delete', async () => {
-    tree = await mountWithNPipelines(5);
-    tree.find('.tableRow').at(0).simulate('click');
-    tree.find('.tableRow').at(2).simulate('click');
-    tree.find('.tableRow').at(3).simulate('click');
-    const deleteBtn = (tree.instance() as PipelineList)
-      .getInitialToolbarState().actions.find(b => b.title === 'Delete');
-    await deleteBtn!.action();
-    const call = updateDialogSpy.mock.calls[0][0];
+    await mountWithNPipelines(5);
+    await selectPipelines(['test-pipeline-id0', 'test-pipeline-id2', 'test-pipeline-id3']);
+    const call = await openDeleteDialog();
     expect(call).toHaveProperty('title', 'Delete 3 pipelines?');
   });
 
   it('does not call delete API for selected pipeline when delete dialog is canceled', async () => {
-    tree = await mountWithNPipelines(1);
-    tree.find('.tableRow').at(0).simulate('click');
-    const deleteBtn = (tree.instance() as PipelineList)
-      .getInitialToolbarState().actions.find(b => b.title === 'Delete');
-    await deleteBtn!.action();
-    const call = updateDialogSpy.mock.calls[0][0];
+    await mountWithNPipelines(1);
+    await selectPipeline('test-pipeline-id0');
+    const call = await openDeleteDialog();
     const cancelBtn = call.buttons.find((b: any) => b.text === 'Cancel');
-    await cancelBtn.onClick();
+    await act(async () => {
+      await cancelBtn.onClick();
+    });
     expect(deletePipelineSpy).not.toHaveBeenCalled();
   });
 
   it('calls delete API for selected pipeline after delete dialog is confirmed', async () => {
-    tree = await mountWithNPipelines(1);
-    tree.find('.tableRow').at(0).simulate('click');
-    const deleteBtn = (tree.instance() as PipelineList)
-      .getInitialToolbarState().actions.find(b => b.title === 'Delete');
-    await deleteBtn!.action();
-    const call = updateDialogSpy.mock.calls[0][0];
+    listPipelineVersionsSpy.mockResolvedValue({ pipeline_versions: [] });
+    await mountWithNPipelines(1);
+    await selectPipeline('test-pipeline-id0');
+    const call = await openDeleteDialog();
     const confirmBtn = call.buttons.find((b: any) => b.text === 'Delete');
-    await confirmBtn.onClick();
-    expect(deletePipelineSpy).toHaveBeenLastCalledWith('test-pipeline-id0');
+    await act(async () => {
+      await confirmBtn.onClick();
+    });
+    await waitFor(() => {
+      expect(deletePipelineSpy).toHaveBeenLastCalledWith('test-pipeline-id0', false);
+    });
   });
 
   it('updates the selected indices after a pipeline is deleted', async () => {
-    tree = await mountWithNPipelines(5);
-    tree.find('.tableRow').at(0).simulate('click');
-    expect(tree.state()).toHaveProperty('selectedIds', ['test-pipeline-id0']);
-    const deleteBtn = (tree.instance() as PipelineList)
-      .getInitialToolbarState().actions.find(b => b.title === 'Delete');
-    await deleteBtn!.action();
-    const call = updateDialogSpy.mock.calls[0][0];
+    listPipelineVersionsSpy.mockResolvedValue({ pipeline_versions: [] });
+    await mountWithNPipelines(5);
+    await selectPipeline('test-pipeline-id0');
+    deletePipelineSpy.mockResolvedValue(undefined as any);
+    const call = await openDeleteDialog();
     const confirmBtn = call.buttons.find((b: any) => b.text === 'Delete');
-    await confirmBtn.onClick();
-    expect(tree.state()).toHaveProperty('selectedIds', []);
+    await act(async () => {
+      await confirmBtn.onClick();
+    });
+    await waitForSelectedPipelines([]);
   });
 
   it('updates the selected indices after multiple pipelines are deleted', async () => {
-    tree = await mountWithNPipelines(5);
-    tree.find('.tableRow').at(0).simulate('click');
-    tree.find('.tableRow').at(3).simulate('click');
-    expect(tree.state()).toHaveProperty('selectedIds', ['test-pipeline-id0', 'test-pipeline-id3']);
-    const deleteBtn = (tree.instance() as PipelineList)
-      .getInitialToolbarState().actions.find(b => b.title === 'Delete');
-    await deleteBtn!.action();
-    const call = updateDialogSpy.mock.calls[0][0];
+    listPipelineVersionsSpy.mockResolvedValue({ pipeline_versions: [] });
+    await mountWithNPipelines(5);
+    await selectPipelines(['test-pipeline-id0', 'test-pipeline-id3']);
+    deletePipelineSpy.mockResolvedValue(undefined as any);
+    const call = await openDeleteDialog();
     const confirmBtn = call.buttons.find((b: any) => b.text === 'Delete');
-    await confirmBtn.onClick();
-    expect(tree.state()).toHaveProperty('selectedIds', []);
+    await act(async () => {
+      await confirmBtn.onClick();
+    });
+    await waitForSelectedPipelines([]);
   });
 
   it('calls delete API for all selected pipelines after delete dialog is confirmed', async () => {
-    tree = await mountWithNPipelines(5);
-    tree.find('.tableRow').at(0).simulate('click');
-    tree.find('.tableRow').at(1).simulate('click');
-    tree.find('.tableRow').at(4).simulate('click');
-    const deleteBtn = (tree.instance() as PipelineList)
-      .getInitialToolbarState().actions.find(b => b.title === 'Delete');
-    await deleteBtn!.action();
-    const call = updateDialogSpy.mock.calls[0][0];
+    listPipelineVersionsSpy.mockResolvedValue({ pipeline_versions: [] });
+    await mountWithNPipelines(5);
+    await selectPipelines(['test-pipeline-id0', 'test-pipeline-id1', 'test-pipeline-id4']);
+    const call = await openDeleteDialog();
     const confirmBtn = call.buttons.find((b: any) => b.text === 'Delete');
-    await confirmBtn.onClick();
-    expect(deletePipelineSpy).toHaveBeenCalledTimes(3);
-    expect(deletePipelineSpy).toHaveBeenCalledWith('test-pipeline-id0');
-    expect(deletePipelineSpy).toHaveBeenCalledWith('test-pipeline-id1');
-    expect(deletePipelineSpy).toHaveBeenCalledWith('test-pipeline-id4');
+    await act(async () => {
+      await confirmBtn.onClick();
+    });
+    await waitFor(() => {
+      expect(deletePipelineSpy).toHaveBeenCalledTimes(3);
+    });
+    expect(deletePipelineSpy).toHaveBeenCalledWith('test-pipeline-id0', false);
+    expect(deletePipelineSpy).toHaveBeenCalledWith('test-pipeline-id1', false);
+    expect(deletePipelineSpy).toHaveBeenCalledWith('test-pipeline-id4', false);
   });
 
   it('shows snackbar confirmation after pipeline is deleted', async () => {
-    tree = await mountWithNPipelines(1);
-    tree.find('.tableRow').at(0).simulate('click');
-    const deleteBtn = (tree.instance() as PipelineList)
-      .getInitialToolbarState().actions.find(b => b.title === 'Delete');
-    await deleteBtn!.action();
-    const call = updateDialogSpy.mock.calls[0][0];
+    listPipelineVersionsSpy.mockResolvedValue({ pipeline_versions: [] });
+    await mountWithNPipelines(1);
+    await selectPipeline('test-pipeline-id0');
+    deletePipelineSpy.mockResolvedValue(undefined as any);
+    const call = await openDeleteDialog();
     const confirmBtn = call.buttons.find((b: any) => b.text === 'Delete');
-    await confirmBtn.onClick();
-    expect(updateSnackbarSpy).toHaveBeenLastCalledWith({
-      message: 'Successfully deleted 1 pipeline!',
-      open: true,
+    await act(async () => {
+      await confirmBtn.onClick();
+    });
+    await waitFor(() => {
+      expect(updateSnackbarSpy).toHaveBeenLastCalledWith({
+        message: 'Deletion succeeded for 1 pipeline',
+        open: true,
+      });
     });
   });
 
   it('shows error dialog when pipeline deletion fails', async () => {
-    tree = await mountWithNPipelines(1);
-    tree.find('.tableRow').at(0).simulate('click');
-    TestUtils.makeErrorResponseOnce(deletePipelineSpy, 'woops, failed');
-    const deleteBtn = (tree.instance() as PipelineList)
-      .getInitialToolbarState().actions.find(b => b.title === 'Delete');
-    await deleteBtn!.action();
-    const call = updateDialogSpy.mock.calls[0][0];
+    listPipelineVersionsSpy.mockResolvedValue({ pipeline_versions: [] });
+    await mountWithNPipelines(1);
+    await selectPipeline('test-pipeline-id0');
+    TestUtils.makeErrorResponseOnce(deletePipelineSpy as any, 'woops, failed');
+    const call = await openDeleteDialog();
     const confirmBtn = call.buttons.find((b: any) => b.text === 'Delete');
-    await confirmBtn.onClick();
-    const lastCall = updateDialogSpy.mock.calls[1][0];
+    await act(async () => {
+      await confirmBtn.onClick();
+    });
+    await waitFor(() => {
+      expect(updateDialogSpy.mock.calls.length).toBeGreaterThan(1);
+    });
+    const lastCall = updateDialogSpy.mock.calls[updateDialogSpy.mock.calls.length - 1][0];
     expect(lastCall).toMatchObject({
-      content: 'Deleting pipeline: test pipeline name0 failed with error: "woops, failed"',
-      title: 'Failed to delete 1 pipeline',
+      content: 'Failed to delete pipeline: test-pipeline-id0 with error: "woops, failed"',
+      title: 'Failed to delete some pipelines and/or some pipeline versions',
     });
   });
 
   it('shows error dialog when multiple pipeline deletions fail', async () => {
-    tree = await mountWithNPipelines(5);
-    tree.find('.tableRow').at(0).simulate('click');
-    tree.find('.tableRow').at(2).simulate('click');
-    tree.find('.tableRow').at(1).simulate('click');
-    tree.find('.tableRow').at(3).simulate('click');
-    deletePipelineSpy.mockImplementation(id => {
+    listPipelineVersionsSpy.mockResolvedValue({ pipeline_versions: [] });
+    await mountWithNPipelines(5);
+    await selectPipelines([
+      'test-pipeline-id0',
+      'test-pipeline-id2',
+      'test-pipeline-id1',
+      'test-pipeline-id3',
+    ]);
+    deletePipelineSpy.mockImplementation((id) => {
       if (id.indexOf(3) === -1 && id.indexOf(2) === -1) {
         throw {
           text: () => Promise.resolve('woops, failed!'),
         };
       }
+      return Promise.resolve();
     });
-    const deleteBtn = (tree.instance() as PipelineList)
-      .getInitialToolbarState().actions.find(b => b.title === 'Delete');
-    await deleteBtn!.action();
-    const call = updateDialogSpy.mock.calls[0][0];
+    const call = await openDeleteDialog();
     const confirmBtn = call.buttons.find((b: any) => b.text === 'Delete');
-    await confirmBtn.onClick();
-    // Should show only one error dialog for both pipelines (plus once for confirmation)
-    expect(updateDialogSpy).toHaveBeenCalledTimes(2);
-    const lastCall = updateDialogSpy.mock.calls[1][0];
+    await act(async () => {
+      await confirmBtn.onClick();
+    });
+    await waitFor(() => {
+      expect(updateDialogSpy).toHaveBeenCalledTimes(2);
+    });
+    const lastCall = updateDialogSpy.mock.calls[updateDialogSpy.mock.calls.length - 1][0];
     expect(lastCall).toMatchObject({
-      content: 'Deleting pipeline: test pipeline name0 failed with error: "woops, failed!"\n\n' +
-        'Deleting pipeline: test pipeline name1 failed with error: "woops, failed!"',
-      title: 'Failed to delete 2 pipelines',
+      content:
+        'Failed to delete pipeline: test-pipeline-id0 with error: "woops, failed!"\n\n' +
+        'Failed to delete pipeline: test-pipeline-id1 with error: "woops, failed!"',
+      title: 'Failed to delete some pipelines and/or some pipeline versions',
     });
 
-    // Should show snackbar for the one successful deletion
+    await waitFor(() => {
+      expect(updateSnackbarSpy).toHaveBeenLastCalledWith({
+        message: 'Deletion succeeded for 2 pipelines',
+        open: true,
+      });
+    });
+  });
+
+  it("delete a pipeline and some other pipeline's version together", async () => {
+    deletePipelineSpy.mockResolvedValue(undefined as any);
+    deletePipelineVersionSpy.mockResolvedValue(undefined as any);
+
+    listPipelineVersionsSpy.mockImplementation((pipelineId: string) => {
+      if (pipelineId === 'test-pipeline-id1') {
+        return Promise.resolve({
+          pipeline_versions: [
+            {
+              display_name: 'test-pipeline-id1_name',
+              name: 'test-pipeline-id1_name',
+              pipeline_id: 'test-pipeline-id1',
+              pipeline_version_id: 'test-pipeline-version-id1',
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ pipeline_versions: [] });
+    });
+
+    await mountWithNPipelines(2);
+    const expandButtons = screen.getAllByRole('button', { name: /expand/i });
+    await userEvent.click(expandButtons[1]);
+    await waitFor(() => {
+      expect(listPipelineVersionsSpy).toHaveBeenCalled();
+    });
+
+    await selectPipeline('test-pipeline-id0');
+    await selectPipelineVersion('test-pipeline-id1', 'test-pipeline-version-id1');
+
+    const call = await openDeleteDialog();
+    const confirmBtn = call.buttons.find((b: any) => b.text === 'Delete');
+    await act(async () => {
+      await confirmBtn.onClick();
+    });
+
+    await waitFor(() => {
+      expect(deletePipelineSpy).toHaveBeenCalledTimes(1);
+      expect(deletePipelineSpy).toHaveBeenCalledWith('test-pipeline-id0', false);
+      expect(deletePipelineVersionSpy).toHaveBeenCalledTimes(1);
+      expect(deletePipelineVersionSpy).toHaveBeenCalledWith(
+        'test-pipeline-id1',
+        'test-pipeline-version-id1',
+      );
+    });
+    await waitForSelectedPipelines([]);
+    await waitFor(() => {
+      expect(getPipelineListState()).toHaveProperty('selectedVersionIds', {
+        'test-pipeline-id1': [],
+      });
+    });
+    await waitFor(() => {
+      expect(updateSnackbarSpy).toHaveBeenLastCalledWith({
+        message: 'Deletion succeeded for 1 pipeline and 1 pipeline version',
+        open: true,
+      });
+    });
+  });
+
+  it('waits for all selected version deletions before updating snackbar or selection state', async () => {
+    let resolveSecondDelete!: () => void;
+    const secondDeletePromise = new Promise<void>((resolve) => {
+      resolveSecondDelete = resolve;
+    });
+
+    deletePipelineVersionSpy
+      .mockImplementationOnce(() => {
+        throw {
+          text: () => Promise.resolve('first version failed'),
+        };
+      })
+      .mockImplementationOnce(() => secondDeletePromise as any);
+
+    listPipelineVersionsSpy.mockImplementation((pipelineId: string) => {
+      if (pipelineId === 'test-pipeline-id0') {
+        return Promise.resolve({
+          pipeline_versions: [
+            {
+              display_name: 'test-pipeline-id0_version_1',
+              name: 'test-pipeline-id0_version_1',
+              pipeline_id: 'test-pipeline-id0',
+              pipeline_version_id: 'test-pipeline-version-id1',
+            },
+            {
+              display_name: 'test-pipeline-id0_version_2',
+              name: 'test-pipeline-id0_version_2',
+              pipeline_id: 'test-pipeline-id0',
+              pipeline_version_id: 'test-pipeline-version-id2',
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ pipeline_versions: [] });
+    });
+
+    await mountWithNPipelines(1);
+    const expandButtons = screen.getAllByRole('button', { name: /expand/i });
+    await userEvent.click(expandButtons[0]);
+    await waitFor(() => {
+      expect(listPipelineVersionsSpy).toHaveBeenCalled();
+    });
+
+    await userEvent.click(await waitForRowById('test-pipeline-version-id1'));
+    await userEvent.click(await waitForRowById('test-pipeline-version-id2'));
+    await waitFor(() => {
+      expect(
+        getPipelineListState()!.selectedVersionIds['test-pipeline-id0'].slice().sort(),
+      ).toEqual(['test-pipeline-version-id1', 'test-pipeline-version-id2']);
+    });
+
+    const call = await openDeleteDialog();
+    const confirmBtn = call.buttons.find((b: any) => b.text === 'Delete');
+
+    let confirmPromise!: Promise<void>;
+    await act(async () => {
+      confirmPromise = confirmBtn.onClick();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(deletePipelineVersionSpy).toHaveBeenCalledTimes(2);
+    });
+    await flushPromisesInAct();
+
+    expect(updateSnackbarSpy).not.toHaveBeenCalled();
+    expect(updateDialogSpy).toHaveBeenCalledTimes(1);
+    expect(getPipelineListState()!.selectedVersionIds['test-pipeline-id0'].slice().sort()).toEqual([
+      'test-pipeline-version-id1',
+      'test-pipeline-version-id2',
+    ]);
+
+    await act(async () => {
+      resolveSecondDelete();
+      await confirmPromise;
+    });
+
+    await waitFor(() => {
+      expect(updateSnackbarSpy).toHaveBeenLastCalledWith({
+        message: 'Deletion succeeded for 1 pipeline version',
+        open: true,
+      });
+    });
+    await waitFor(() => {
+      expect(updateDialogSpy).toHaveBeenCalledTimes(2);
+    });
+    expect(updateDialogSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        content:
+          'Failed to delete pipeline version: test-pipeline-version-id1 with error: "first version failed"',
+        title: 'Failed to delete some pipelines and/or some pipeline versions',
+      }),
+    );
+    await waitFor(() => {
+      expect(getPipelineListState()!.selectedVersionIds['test-pipeline-id0']).toEqual([
+        'test-pipeline-version-id1',
+      ]);
+    });
+  });
+
+  it('shows "Delete All" dialog when pipelines have versions and calls API with cascade=true', async () => {
+    listPipelineVersionsSpy.mockResolvedValue({
+      pipeline_versions: [
+        {
+          pipeline_version_id: 'test-version-id-1',
+          display_name: 'test version 1',
+          name: 'test-version-1',
+        },
+        {
+          pipeline_version_id: 'test-version-id-2',
+          display_name: 'test version 2',
+          name: 'test-version-2',
+        },
+      ],
+    });
+
+    deletePipelineSpy.mockResolvedValue(undefined as any);
+    await mountWithNPipelines(1);
+    await selectPipeline('test-pipeline-id0');
+
+    const call = await openDeleteDialog();
+
+    expect(call.title).toBe('Delete 1 pipeline?');
+    expect(call.content).toContain('pipeline has existing versions');
+    expect(call.content).toContain('Deleting this pipeline will also delete all its versions');
+    expect(call.content).toContain('This action cannot be undone');
+
+    const confirmBtn = call.buttons.find((b: any) => b.text === 'Delete All');
+    expect(confirmBtn).toBeDefined();
+
+    await act(async () => {
+      await confirmBtn.onClick();
+    });
+    expect(deletePipelineSpy).toHaveBeenLastCalledWith('test-pipeline-id0', true);
     expect(updateSnackbarSpy).toHaveBeenLastCalledWith({
-      message: 'Successfully deleted 2 pipelines!',
+      message: 'Deletion succeeded for 1 pipeline',
       open: true,
     });
   });
 
-  it('shows upload dialog when upload button is clicked', async () => {
-    tree = await mountWithNPipelines(0);
-    const instance = tree.instance() as PipelineList;
-    const uploadBtn = instance.getInitialToolbarState().actions.find(b => b.title === 'Upload pipeline');
-    expect(uploadBtn).toBeDefined();
-    await uploadBtn!.action();
-    expect(instance.state).toHaveProperty('uploadDialogOpen', true);
-  });
-
-  it('dismisses the upload dialog', async () => {
-    tree = shallow(<PipelineList {...generateProps()} />);
-    tree.setState({ uploadDialogOpen: true });
-    tree.find('UploadPipelineDialog').simulate('close', false);
-    tree.update();
-    expect(tree.state()).toHaveProperty('uploadDialogOpen', false);
-  });
-
-  it('does not try to upload if the upload dialog dismissed', async () => {
-    tree = shallow(<PipelineList {...generateProps()} />);
-    const handlerSpy = jest.spyOn(tree.instance() as any, '_uploadDialogClosed');
-    tree.setState({ uploadDialogOpen: true });
-    tree.find('UploadPipelineDialog').simulate('close', false);
-    expect(handlerSpy).toHaveBeenLastCalledWith(false);
-    expect(uploadPipelineSpy).not.toHaveBeenCalled();
-  });
-
-  it('does not try to upload if import method is local and no file is returned from upload dialog', async () => {
-    tree = shallow(<PipelineList {...generateProps()} />);
-    const handlerSpy = jest.spyOn(tree.instance() as any, '_uploadDialogClosed');
-    tree.setState({ uploadDialogOpen: true });
-    tree.find('UploadPipelineDialog').simulate('close', true, 'some name', null, '', ImportMethod.LOCAL);
-    expect(handlerSpy).toHaveBeenLastCalledWith(true, 'some name', null, '', ImportMethod.LOCAL);
-    expect(uploadPipelineSpy).not.toHaveBeenCalled();
-  });
-
-  it('does not try to upload if import method is url and no url is returned from upload dialog', async () => {
-    tree = shallow(<PipelineList {...generateProps()} />);
-    const handlerSpy = jest.spyOn(tree.instance() as any, '_uploadDialogClosed');
-    tree.setState({ uploadDialogOpen: true });
-    tree.find('UploadPipelineDialog').simulate('close', true, 'some name', null, '', ImportMethod.URL);
-    expect(handlerSpy).toHaveBeenLastCalledWith(true, 'some name', null, '', ImportMethod.URL);
-    expect(uploadPipelineSpy).not.toHaveBeenCalled();
-  });
-
-  it('tries to upload if import method is local and a file is returned from upload dialog', async () => {
-    tree = shallow(<PipelineList {...generateProps()} />);
-    tree.setState({ uploadDialogOpen: true });
-    tree.find('UploadPipelineDialog').simulate('close', true, 'some name', { body: 'something' }, '', ImportMethod.LOCAL);
-    tree.update();
-    await createPipelineSpy;
-    await uploadPipelineSpy;
-    expect(uploadPipelineSpy).toHaveBeenLastCalledWith('some name', { body: 'something' });
-    expect(createPipelineSpy).not.toHaveBeenCalled();
-
-    // Check the dialog is closed
-    expect(tree.state()).toHaveProperty('uploadDialogOpen', false);
-  });
-
-  it('shows error dialog and does not dismiss upload dialog when upload fails', async () => {
-    TestUtils.makeErrorResponseOnce(uploadPipelineSpy, 'woops, could not upload');
-    tree = shallow(<PipelineList {...generateProps()} />);
-    tree.setState({ uploadDialogOpen: true });
-    tree.find('UploadPipelineDialog').simulate('close', true, 'some name', { body: 'something' }, '', ImportMethod.LOCAL);
-    tree.update();
-    await uploadPipelineSpy;
-    await TestUtils.flushPromises();
-    expect(uploadPipelineSpy).toHaveBeenLastCalledWith('some name', { body: 'something' });
-    expect(updateDialogSpy).toHaveBeenLastCalledWith(expect.objectContaining({
-      content: 'woops, could not upload',
-      title: 'Failed to upload pipeline',
-    }));
-    // Check the dialog is not closed
-    expect(tree.state()).toHaveProperty('uploadDialogOpen', true);
-  });
-
-  it('tries to create a pipeline if import method is url and a url is returned from upload dialog', async () => {
-    tree = shallow(<PipelineList {...generateProps()} />);
-    tree.setState({ uploadDialogOpen: true });
-    tree.find('UploadPipelineDialog').simulate('close', true, 'some name', null, 'https://some.url.com', ImportMethod.URL);
-    tree.update();
-    await createPipelineSpy;
-    await uploadPipelineSpy;
-    expect(createPipelineSpy).toHaveBeenLastCalledWith({
-      name: 'some name',
-      url: { pipeline_url: 'https://some.url.com' }
+  it('shows "Delete All" dialog for multiple pipelines with versions', async () => {
+    listPipelineVersionsSpy.mockResolvedValue({
+      pipeline_versions: [
+        {
+          pipeline_version_id: 'test-version-id-1',
+          display_name: 'test version 1',
+          name: 'test-version-1',
+        },
+      ],
     });
-    expect(uploadPipelineSpy).not.toHaveBeenCalled();
 
-    // Check the dialog is closed
-    expect(tree.state()).toHaveProperty('uploadDialogOpen', false);
-  });
+    deletePipelineSpy.mockResolvedValue(undefined as any);
+    await mountWithNPipelines(3);
 
-  it('shows error dialog and does not dismiss upload dialog when create fails', async () => {
-    TestUtils.makeErrorResponseOnce(createPipelineSpy, 'woops, could not create');
-    tree = shallow(<PipelineList {...generateProps()} />);
-    tree.setState({ uploadDialogOpen: true });
-    tree.find('UploadPipelineDialog').simulate('close', true, 'some name', null, 'https://some.url.com', ImportMethod.URL);
-    tree.update();
-    await uploadPipelineSpy;
-    await TestUtils.flushPromises();
-    expect(createPipelineSpy).toHaveBeenLastCalledWith({
-      name: 'some name',
-      url: { pipeline_url: 'https://some.url.com' }
+    await selectPipelines(['test-pipeline-id0', 'test-pipeline-id1']);
+
+    const call = await openDeleteDialog();
+
+    expect(call.title).toBe('Delete 2 pipelines?');
+    expect(call.content).toContain('pipelines have existing versions');
+    expect(call.content).toContain('Deleting these pipelines will also delete all their versions');
+
+    const confirmBtn = call.buttons.find((b: any) => b.text === 'Delete All');
+    expect(confirmBtn).toBeDefined();
+    await act(async () => {
+      await confirmBtn.onClick();
     });
-    expect(updateDialogSpy).toHaveBeenLastCalledWith(expect.objectContaining({
-      content: 'woops, could not create',
-      title: 'Failed to upload pipeline',
-    }));
-
-    // Check the dialog is not closed
-    expect(tree.state()).toHaveProperty('uploadDialogOpen', true);
+    expect(deletePipelineSpy).toHaveBeenCalledTimes(2);
+    expect(deletePipelineSpy).toHaveBeenCalledWith('test-pipeline-id0', true);
+    expect(deletePipelineSpy).toHaveBeenCalledWith('test-pipeline-id1', true);
   });
 
+  it('does not call delete API when "Delete All" dialog is canceled', async () => {
+    listPipelineVersionsSpy.mockResolvedValue({
+      pipeline_versions: [
+        {
+          pipeline_version_id: 'test-version-id-1',
+          display_name: 'test version 1',
+          name: 'test-version-1',
+        },
+      ],
+    });
+
+    await mountWithNPipelines(1);
+    await selectPipeline('test-pipeline-id0');
+
+    const call = await openDeleteDialog();
+    const cancelBtn = call.buttons.find((b: any) => b.text === 'Cancel');
+    await act(async () => {
+      await cancelBtn.onClick();
+    });
+    expect(deletePipelineSpy).not.toHaveBeenCalled();
+  });
 });

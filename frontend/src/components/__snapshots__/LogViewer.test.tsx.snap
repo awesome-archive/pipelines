@@ -1,22 +1,18 @@
-// Jest Snapshot v1, https://goo.gl/fbAQLP
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`LogViewer does not linkify non http/https urls 1`] = `
+exports[`LogViewer > does not linkify non http/https urls 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={Object {}}
+    class="number_f90q0xh"
   >
     1
   </span>
   <span
-    className="line"
-    style={Object {}}
+    class="line_faojhcs"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         this string: gs://path is a GCS path
       </span>
@@ -25,41 +21,34 @@ exports[`LogViewer does not linkify non http/https urls 1`] = `
 </div>
 `;
 
-exports[`LogViewer linkifies standalone https urls 1`] = `
+exports[`LogViewer > linkifies standalone https urls 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={Object {}}
+    class="number_f90q0xh"
   >
     1
   </span>
   <span
-    className="line"
-    style={Object {}}
+    class="line_faojhcs"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         this string: 
       </span>
     </span>
-    <span
-      key="1"
-    >
+    <span>
       <a
-        className="a"
+        class="a_fj90q9w"
         href="https://path.com"
+        rel="noopener noreferrer"
         target="_blank"
       >
         https://path.com
       </a>
     </span>
-    <span
-      key="2"
-    >
+    <span>
       <span>
          is a url
       </span>
@@ -68,41 +57,34 @@ exports[`LogViewer linkifies standalone https urls 1`] = `
 </div>
 `;
 
-exports[`LogViewer linkifies standalone urls 1`] = `
+exports[`LogViewer > linkifies standalone urls 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={Object {}}
+    class="number_f90q0xh"
   >
     1
   </span>
   <span
-    className="line"
-    style={Object {}}
+    class="line_faojhcs"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         this string: 
       </span>
     </span>
-    <span
-      key="1"
-    >
+    <span>
       <a
-        className="a"
+        class="a_fj90q9w"
         href="http://path.com"
+        rel="noopener noreferrer"
         target="_blank"
       >
         http://path.com
       </a>
     </span>
-    <span
-      key="2"
-    >
+    <span>
       <span>
          is a url
       </span>
@@ -111,41 +93,34 @@ exports[`LogViewer linkifies standalone urls 1`] = `
 </div>
 `;
 
-exports[`LogViewer linkifies substring urls 1`] = `
+exports[`LogViewer > linkifies substring urls 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={Object {}}
+    class="number_f90q0xh"
   >
     1
   </span>
   <span
-    className="line"
-    style={Object {}}
+    class="line_faojhcs"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         this string:
       </span>
     </span>
-    <span
-      key="1"
-    >
+    <span>
       <a
-        className="a"
+        class="a_fj90q9w"
         href="http://path.com"
+        rel="noopener noreferrer"
         target="_blank"
       >
         http://path.com
       </a>
     </span>
-    <span
-      key="2"
-    >
+    <span>
       <span>
          is a url
       </span>
@@ -154,23 +129,19 @@ exports[`LogViewer linkifies substring urls 1`] = `
 </div>
 `;
 
-exports[`LogViewer renders a multi-line log 1`] = `
+exports[`LogViewer > renders a multi-line log 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={Object {}}
+    class="number_f90q0xh"
   >
     1
   </span>
   <span
-    className="line"
-    style={Object {}}
+    class="line_faojhcs"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         Lorem Ipsum is simply dummy text of the printing and typesetting
       </span>
@@ -179,33 +150,21 @@ exports[`LogViewer renders a multi-line log 1`] = `
 </div>
 `;
 
-exports[`LogViewer renders a row with error 1`] = `
+exports[`LogViewer > renders a row with error 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={
-      Object {
-        "backgroundColor": "#700000",
-        "color": "white",
-      }
-    }
+    class="number_f90q0xh"
+    style="background-color: rgb(112, 0, 0); color: white;"
   >
     1
   </span>
   <span
-    className="line"
-    style={
-      Object {
-        "backgroundColor": "#700000",
-        "color": "white",
-      }
-    }
+    class="line_faojhcs"
+    style="background-color: rgb(112, 0, 0); color: white;"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         line1 with error
       </span>
@@ -214,33 +173,21 @@ exports[`LogViewer renders a row with error 1`] = `
 </div>
 `;
 
-exports[`LogViewer renders a row with error word as substring 1`] = `
+exports[`LogViewer > renders a row with error word as substring 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={
-      Object {
-        "backgroundColor": "#700000",
-        "color": "white",
-      }
-    }
+    class="number_f90q0xh"
+    style="background-color: rgb(112, 0, 0); color: white;"
   >
     1
   </span>
   <span
-    className="line"
-    style={
-      Object {
-        "backgroundColor": "#700000",
-        "color": "white",
-      }
-    }
+    class="line_faojhcs"
+    style="background-color: rgb(112, 0, 0); color: white;"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         line1 with errorWord
       </span>
@@ -249,23 +196,19 @@ exports[`LogViewer renders a row with error word as substring 1`] = `
 </div>
 `;
 
-exports[`LogViewer renders a row with given index as line number 1`] = `
+exports[`LogViewer > renders a row with given index as line number 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={Object {}}
+    class="number_f90q0xh"
   >
     1
   </span>
   <span
-    className="line"
-    style={Object {}}
+    class="line_faojhcs"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         line1
       </span>
@@ -274,33 +217,21 @@ exports[`LogViewer renders a row with given index as line number 1`] = `
 </div>
 `;
 
-exports[`LogViewer renders a row with upper case error 1`] = `
+exports[`LogViewer > renders a row with upper case error 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={
-      Object {
-        "backgroundColor": "#700000",
-        "color": "white",
-      }
-    }
+    class="number_f90q0xh"
+    style="background-color: rgb(112, 0, 0); color: white;"
   >
     1
   </span>
   <span
-    className="line"
-    style={
-      Object {
-        "backgroundColor": "#700000",
-        "color": "white",
-      }
-    }
+    class="line_faojhcs"
+    style="background-color: rgb(112, 0, 0); color: white;"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         line1 with ERROR
       </span>
@@ -309,33 +240,21 @@ exports[`LogViewer renders a row with upper case error 1`] = `
 </div>
 `;
 
-exports[`LogViewer renders a row with upper case warning 1`] = `
+exports[`LogViewer > renders a row with upper case warning 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={
-      Object {
-        "backgroundColor": "#545400",
-        "color": "white",
-      }
-    }
+    class="number_f90q0xh"
+    style="background-color: rgb(84, 84, 0); color: white;"
   >
     1
   </span>
   <span
-    className="line"
-    style={
-      Object {
-        "backgroundColor": "#545400",
-        "color": "white",
-      }
-    }
+    class="line_faojhcs"
+    style="background-color: rgb(84, 84, 0); color: white;"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         line1 with WARNING
       </span>
@@ -344,33 +263,21 @@ exports[`LogViewer renders a row with upper case warning 1`] = `
 </div>
 `;
 
-exports[`LogViewer renders a row with warn 1`] = `
+exports[`LogViewer > renders a row with warn 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={
-      Object {
-        "backgroundColor": "#545400",
-        "color": "white",
-      }
-    }
+    class="number_f90q0xh"
+    style="background-color: rgb(84, 84, 0); color: white;"
   >
     1
   </span>
   <span
-    className="line"
-    style={
-      Object {
-        "backgroundColor": "#545400",
-        "color": "white",
-      }
-    }
+    class="line_faojhcs"
+    style="background-color: rgb(84, 84, 0); color: white;"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         line1 with warn
       </span>
@@ -379,33 +286,21 @@ exports[`LogViewer renders a row with warn 1`] = `
 </div>
 `;
 
-exports[`LogViewer renders a row with warning 1`] = `
+exports[`LogViewer > renders a row with warning 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={
-      Object {
-        "backgroundColor": "#545400",
-        "color": "white",
-      }
-    }
+    class="number_f90q0xh"
+    style="background-color: rgb(84, 84, 0); color: white;"
   >
     1
   </span>
   <span
-    className="line"
-    style={
-      Object {
-        "backgroundColor": "#545400",
-        "color": "white",
-      }
-    }
+    class="line_faojhcs"
+    style="background-color: rgb(84, 84, 0); color: white;"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         line1 with warning
       </span>
@@ -414,33 +309,21 @@ exports[`LogViewer renders a row with warning 1`] = `
 </div>
 `;
 
-exports[`LogViewer renders a row with warning word as substring 1`] = `
+exports[`LogViewer > renders a row with warning word as substring 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={
-      Object {
-        "backgroundColor": "#545400",
-        "color": "white",
-      }
-    }
+    class="number_f90q0xh"
+    style="background-color: rgb(84, 84, 0); color: white;"
   >
     1
   </span>
   <span
-    className="line"
-    style={
-      Object {
-        "backgroundColor": "#545400",
-        "color": "white",
-      }
-    }
+    class="line_faojhcs"
+    style="background-color: rgb(84, 84, 0); color: white;"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         line1 with warning:something
       </span>
@@ -449,34 +332,41 @@ exports[`LogViewer renders a row with warning word as substring 1`] = `
 </div>
 `;
 
-exports[`LogViewer renders an empty container when no logs passed 1`] = `
-<AutoSizer
-  disableHeight={false}
-  disableWidth={false}
-  onResize={[Function]}
-  style={Object {}}
->
-  <Component />
-</AutoSizer>
+exports[`LogViewer > renders an empty container when no logs passed 1`] = `
+<DocumentFragment>
+  <div
+    data-auto-sizer=""
+  />
+  <div
+    class="resize-triggers"
+  >
+    <div
+      class="expand-trigger"
+    >
+      <div
+        style="width: 1px; height: 1px;"
+      />
+    </div>
+    <div
+      class="contract-trigger"
+    />
+  </div>
+</DocumentFragment>
 `;
 
-exports[`LogViewer renders one log line 1`] = `
+exports[`LogViewer > renders one log line 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={Object {}}
+    class="number_f90q0xh"
   >
     1
   </span>
   <span
-    className="line"
-    style={Object {}}
+    class="line_faojhcs"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         first line
       </span>
@@ -485,23 +375,19 @@ exports[`LogViewer renders one log line 1`] = `
 </div>
 `;
 
-exports[`LogViewer renders one long line without breaking 1`] = `
+exports[`LogViewer > renders one long line without breaking 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={Object {}}
+    class="number_f90q0xh"
   >
     1
   </span>
   <span
-    className="line"
-    style={Object {}}
+    class="line_faojhcs"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         Lorem Ipsum is simply dummy text of the printing and typesettingindustry. Lorem Ipsum has been the industry's standard dummy text eversince the 1500s, when an unknown printer took a galley of type andscrambled it to make a type specimen book. It has survived not only fivecenturies, but also the leap into electronic typesetting, remainingessentially unchanged. It was popularised in the 1960s with the releaseof Letraset sheets containing Lorem Ipsum passages, and more recentlywith desktop publishing software like Aldus PageMaker including versionsof Lorem Ipsum.
       </span>
@@ -510,23 +396,19 @@ exports[`LogViewer renders one long line without breaking 1`] = `
 </div>
 `;
 
-exports[`LogViewer renders two log lines 1`] = `
+exports[`LogViewer > renders two log lines 1`] = `
 <div
-  className="line"
+  class="line_faojhcs"
 >
   <span
-    className="number"
-    style={Object {}}
+    class="number_f90q0xh"
   >
     1
   </span>
   <span
-    className="line"
-    style={Object {}}
+    class="line_faojhcs"
   >
-    <span
-      key="0"
-    >
+    <span>
       <span>
         first line
       </span>

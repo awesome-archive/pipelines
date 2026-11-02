@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@ import (
 
 var (
 	// DefaultJobBackOff is the default backoff period
-	DefaultJobBackOff = 10 * time.Second
+	DefaultJobBackOff = 1 * time.Second
 	// MaxJobBackOff is the max backoff period
 	MaxJobBackOff = 360 * time.Second
 )
@@ -39,16 +39,15 @@ type Saver interface {
 }
 
 type EventHandler interface {
-	AddEventHandler(handler cache.ResourceEventHandler)
+	AddEventHandler(handler cache.ResourceEventHandler) (cache.ResourceEventHandlerRegistration, error)
 }
 
 // PersistenceWorker is a generic worker to persist objects from a queue.
 type PersistenceWorker struct {
-	// swfWorkqueue is a rate limited work queue. This is used to queue work to be
+	// workqueue is a rate limited work queue. This is used to queue work to be
 	// processed instead of performing it as soon as a change happens. This
 	// means we can ensure we only process a fixed amount of resources at a
-	// time, and makes it easy to ensure we are never processing the same item
-	// simultaneously in two different workers.
+	// time.
 	workqueue workqueue.RateLimitingInterface
 
 	// An interface to generate the current time.
@@ -61,9 +60,10 @@ type PersistenceWorker struct {
 func NewPersistenceWorker(
 	time util.TimeInterface,
 	name string,
-	eventHandler EventHandler,
+	eventHandler util.ExecutionInformerEventHandler,
 	enforceRequeueDelays bool,
-	saver Saver) *PersistenceWorker {
+	saver Saver,
+) (*PersistenceWorker, error) {
 	worker := &PersistenceWorker{
 		workqueue: workqueue.NewNamedRateLimitingQueue(
 			workqueue.NewItemExponentialFailureRateLimiter(DefaultJobBackOff, MaxJobBackOff), name),
@@ -75,15 +75,18 @@ func NewPersistenceWorker(
 	log.Info("Setting up event handlers")
 
 	// Set up an event handler for when the Scheduled Workflow changes
-	eventHandler.AddEventHandler(&cache.ResourceEventHandlerFuncs{
+	_, err := eventHandler.AddEventHandler(&cache.ResourceEventHandlerFuncs{
 		AddFunc: worker.enqueue,
 		UpdateFunc: func(old, new interface{}) {
 			worker.enqueue(new)
 		},
 		DeleteFunc: worker.enqueueForDelete,
 	})
+	if err != nil {
+		return nil, err
+	}
 
-	return worker
+	return worker, nil
 }
 
 func (p *PersistenceWorker) Shutdown() {
@@ -102,9 +105,8 @@ func (p *PersistenceWorker) RunWorker() {
 	}
 }
 
-// enqueue takes a ScheduledWorkflow and converts it into a namespace/name
-// string which is then put onto the work queue. This method should *not* be
-// passed resources of any type other than ScheduledWorkflow.
+// enqueue takes a Workflow or a ScheduledWorkflow and converts it
+// into a namespace/name string which is then put onto the work queue.
 func (p *PersistenceWorker) enqueue(obj interface{}) {
 	var key string
 	var err error
@@ -112,11 +114,9 @@ func (p *PersistenceWorker) enqueue(obj interface{}) {
 		runtime.HandleError(fmt.Errorf("Equeuing object: error: %v: %+v", err, obj))
 		return
 	}
-	if p.enforceRequeueDelays {
-		p.workqueue.AddRateLimited(key) // Exponential backoff.
-	} else {
-		p.workqueue.Add(key) // For testing.
-	}
+	// New state is ready to persist immediately. Only failed saves consume retry
+	// backoff; ordinary status updates must not inflate the failure count.
+	p.workqueue.Add(key)
 }
 
 func (p *PersistenceWorker) enqueueForDelete(obj interface{}) {
@@ -160,33 +160,12 @@ func (p *PersistenceWorker) processNextWorkItem() bool {
 			return true
 		}
 
-		// Notes on workqueues:
-		// - when using: workqueue.Forget
-		//   The item is reprocessed after the next SharedInformerFactory defaultResync.
-		// - when using: workqueue.Forget && swfWorkqueue.Add()
-		//   The item is reprocessed immediately.
-		//   This is not recommended as the status changes may not have propagated, leading to
-		//   a (recoverable) versioning error.
-		// - when using: workqueue.Forget && swfWorkqueue.AddAfter(X seconds)
-		//   The item is reprocessed after X seconds.
-		//   It can be re-processes earlier depending on SharedInformerFactory defaultResync.
-		//   Deleting and recreating the resource using kubectl does not trigger early processing.
-		// - when using: workqueue.Forget && swfWorkqueue.AddRateLimited()
-		//   The item is reprocessed after the baseDelay
-		// - when using: workqueue.AddRateLimited()
-		//   The item is reprocessed folowing the exponential backoff strategy:
-		//   baseDelay * 10^(failure count)
-		//   It is not reprocessed earlier due to SharedInformerFactory defaultResync.
-		//   It is not reprocessed earlier even if the resource is deleted/re-created.
-		// - when using: workqueue.Add()
-		//   The item is reprocessed immediately (not recommended)
-		// - when using: workqueue.AddAfter(X seconds)
-		//   The item is reprocessed immediately
-		// - when using: nothing
-		//   The item is reprocessed using the exponential backoff strategy.
+		// Retries back off until another informer event makes fresh state ready.
+		// Successful saves forget the failure count; the queue still coalesces
+		// duplicate events and prevents concurrent processing of the same key.
 
 		// Run the syncHandler, passing it the namespace/name string of the
-		// ScheduledWorkflow to be synced.
+		// resource to be synced.
 		err := p.syncHandler(key)
 		retryOnError := errorutil.HasCustomCode(err, errorutil.CUSTOM_CODE_TRANSIENT)
 		if err != nil && retryOnError {
@@ -214,9 +193,8 @@ func (p *PersistenceWorker) processNextWorkItem() bool {
 	}(obj)
 }
 
-// syncHandler compares the actual state with the desired, and attempts to
-// converge the two. It then updates the Status block of the ScheduledWorkflow
-// with the current status of the resource.
+// syncHandler picks items from the queue and passes them to the saver, which,
+// in turn, calls Report[Scheduled]Workflow to sync it with the DB
 func (p *PersistenceWorker) syncHandler(key string) error {
 
 	// Convert the namespace/name string into a distinct namespace and name

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,220 +17,653 @@
 package filter
 
 import (
+	"encoding/json"
 	"fmt"
+	"reflect"
+	"strings"
 
 	"github.com/Masterminds/squirrel"
-	"github.com/golang/protobuf/ptypes"
+	apiv2 "github.com/kubeflow/pipelines/backend/api/v2/go_client"
+	"github.com/kubeflow/pipelines/backend/src/apiserver/common/sql/dialect"
 	"github.com/kubeflow/pipelines/backend/src/common/util"
-
-	api "github.com/kubeflow/pipelines/backend/api/go_client"
+	"github.com/kubeflow/pipelines/backend/src/crd/kubernetes/v2beta1"
 )
+
+const filterMessage = "Filter %v is not implemented for Kubernetes pipeline store. Supported filters are eq, neq, in, and substring."
+
+// Internal representation of a predicate.
+type Predicate struct {
+	operation string
+	key       string
+	value     interface{}
+}
 
 // Filter represents a filter that can be applied when querying an arbitrary API
 // resource.
 type Filter struct {
-	filterProto *api.Filter
+	eq  map[string][]interface{}
+	neq map[string][]interface{}
+	gt  map[string][]interface{}
+	gte map[string][]interface{}
+	lt  map[string][]interface{}
+	lte map[string][]interface{}
 
-	eq  map[string]interface{}
-	neq map[string]interface{}
-	gt  map[string]interface{}
-	gte map[string]interface{}
-	lt  map[string]interface{}
-	lte map[string]interface{}
+	in map[string][]interface{}
 
-	in map[string]interface{}
+	substring map[string][]interface{}
 
-	substring map[string]interface{}
+	// caseInsensitiveKeys holds the set of qualified column names (e.g.
+	// "pipelines.Name") for which EQ/NEQ/IN comparisons should use
+	// case-insensitive semantics (LOWER() in SQL, EqualFold in-memory).
+	// Fields not in this set use exact comparison.
+	// SUBSTRING always uses case-insensitive semantics regardless.
+	caseInsensitiveKeys map[string]struct{}
+}
+
+func (f *Filter) isCaseInsensitive(key string) bool {
+	if f.caseInsensitiveKeys == nil {
+		return false
+	}
+	_, ok := f.caseInsensitiveKeys[key]
+	return ok
+}
+
+// filterForMarshaling is a helper struct for marshaling Filter into JSON. This
+// is needed as we don't want to export the fields in Filter.
+type filterForMarshaling struct {
+	EQ  map[string][]interface{}
+	NEQ map[string][]interface{}
+	GT  map[string][]interface{}
+	GTE map[string][]interface{}
+	LT  map[string][]interface{}
+	LTE map[string][]interface{}
+
+	IN map[string][]interface{}
+
+	SUBSTRING map[string][]interface{}
+
+	CaseInsensitiveKeys map[string]struct{} `json:",omitempty"`
+}
+
+// MarshalJSON implements JSON Marshaler for Filter.
+func (f *Filter) MarshalJSON() ([]byte, error) {
+	return json.Marshal(&filterForMarshaling{
+		EQ:                  f.eq,
+		NEQ:                 f.neq,
+		GT:                  f.gt,
+		GTE:                 f.gte,
+		LT:                  f.lt,
+		LTE:                 f.lte,
+		IN:                  f.in,
+		SUBSTRING:           f.substring,
+		CaseInsensitiveKeys: f.caseInsensitiveKeys,
+	})
+}
+
+// UnmarshalJSON implements JSON Unmarshaler for Filter.
+func (f *Filter) UnmarshalJSON(b []byte) error {
+	ffm := filterForMarshaling{}
+	err := json.Unmarshal(b, &ffm)
+	if err != nil {
+		return err
+	}
+
+	f.eq = ffm.EQ
+	f.neq = ffm.NEQ
+	f.gt = ffm.GT
+	f.gte = ffm.GTE
+	f.lt = ffm.LT
+	f.lte = ffm.LTE
+	f.in = ffm.IN
+	f.substring = ffm.SUBSTRING
+	f.caseInsensitiveKeys = ffm.CaseInsensitiveKeys
+
+	// json.Unmarshal decodes JSON arrays into []interface{}.
+	// These codes normalize them back to []string when possible,
+	// so that AddToSelect always sees []string and applies LOWER() correctly.
+	for k, vs := range f.in {
+		for i, v := range vs {
+			iface, ok := v.([]interface{})
+			if !ok {
+				continue
+			}
+			strs := make([]string, len(iface))
+			allStrings := true
+			for j, elem := range iface {
+				s, isStr := elem.(string)
+				if !isStr {
+					allStrings = false
+					break
+				}
+				strs[j] = s
+			}
+			if allStrings {
+				f.in[k][i] = strs
+			}
+		}
+	}
+
+	return nil
 }
 
 // New creates a new Filter from parsing the API filter protocol buffer.
-func New(filterProto *api.Filter) (*Filter, error) {
-	f := &Filter{
-		filterProto: filterProto,
-		eq:          make(map[string]interface{}),
-		neq:         make(map[string]interface{}),
-		gt:          make(map[string]interface{}),
-		gte:         make(map[string]interface{}),
-		lt:          make(map[string]interface{}),
-		lte:         make(map[string]interface{}),
-		in:          make(map[string]interface{}),
-		substring:   make(map[string]interface{}),
+func New(filterProto *apiv2.Filter) (*Filter, error) {
+	predicates, err := toPredicates(filterProto)
+	if err != nil {
+		return nil, err
+	}
+	return NewFromPredicate(predicates)
+}
+
+// NewWithKeyMap is like New, but takes an additional map and model name for mapping key names
+// in the protocol buffer to an appropriate name for use when querying the
+// model. For example, if the API name of a field is "name", the model name is "pipelines", and
+// the equivalent column name is "Name", then filterProto with predicates against key "name"
+// will be parsed as if the key value was "pipelines.Name".
+func NewWithKeyMap(filterProto *apiv2.Filter, keyMap map[string]string, modelName string) (*Filter, error) {
+	// Fully qualify column name to avoid "ambiguous column name" error.
+	var modelNamePrefix string
+	if modelName != "" {
+		modelNamePrefix = modelName + "."
 	}
 
-	if err := f.parseFilterProto(); err != nil {
+	predicates, err := toPredicates(filterProto)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, pred := range predicates {
+		k, ok := keyMap[pred.key]
+		if !ok {
+			return nil, util.NewInvalidInputError("no support for filtering on unrecognized field %q", pred.key)
+		}
+		pred.key = modelNamePrefix + k
+	}
+	return NewFromPredicate(predicates)
+}
+
+// New creates a new Filter from parsed predicates.
+func NewFromPredicate(predicates []*Predicate) (*Filter, error) {
+	if len(predicates) == 0 {
+		return nil, nil
+	}
+
+	f := &Filter{
+		eq:        make(map[string][]interface{}, 0),
+		neq:       make(map[string][]interface{}, 0),
+		gt:        make(map[string][]interface{}, 0),
+		gte:       make(map[string][]interface{}, 0),
+		lt:        make(map[string][]interface{}, 0),
+		lte:       make(map[string][]interface{}, 0),
+		in:        make(map[string][]interface{}, 0),
+		substring: make(map[string][]interface{}, 0),
+	}
+
+	if err := f.parsePredicates(predicates); err != nil {
 		return nil, err
 	}
 	return f, nil
 }
 
-// NewWithKeyMap is like New, but takes an additional map for mapping key names
-// in the protocol buffer to an appropriate name for use when querying the
-// model. For example, if the API name of a field is "foo" and the equivalent
-// model name is "ModelFoo", then filterProto with predicates against key "foo"
-// will be parsed as if the key value was "ModelFoo".
-func NewWithKeyMap(filterProto *api.Filter, keyMap map[string]string) (*Filter, error) {
-	for _, pred := range filterProto.Predicates {
-		k, ok := keyMap[pred.Key]
-		if !ok {
-			return nil, util.NewInvalidInputError("no support for filtering on unrecognized field %q", pred.Key)
+// ValidateKeys checks all filter keys using the provided validator function.
+// Keys may be qualified identifiers like "table.Column"; each segment is validated separately.
+func (f *Filter) ValidateKeys(validator func(segment string) error) error {
+	for _, m := range []map[string][]interface{}{f.eq, f.neq, f.gt, f.gte, f.lt, f.lte, f.in, f.substring} {
+		for k := range m {
+			for _, segment := range strings.Split(k, ".") {
+				if err := validator(segment); err != nil {
+					return fmt.Errorf("invalid filter key %q: %w", k, err)
+				}
+			}
 		}
-		pred.Key = k
 	}
-	return New(filterProto)
+	return nil
+}
+
+// ReplaceKeys replaces API field names with qualified column names and builds
+// the case-insensitive key set. caseInsensitiveAPIFields contains the API-level
+// field names (e.g. "name", "display_name") that should use case-insensitive
+// comparison; it may be nil when no fields need this treatment.
+func (f *Filter) ReplaceKeys(keyMap map[string]string, prefix string, caseInsensitiveAPIFields map[string]struct{}) error {
+	f.SetCaseInsensitiveFields(keyMap, prefix, caseInsensitiveAPIFields)
+	if prefix != "" {
+		prefix = prefix + "."
+	}
+
+	if err := replaceMapKeys(f.eq, keyMap, prefix); err != nil {
+		return err
+	}
+	if err := replaceMapKeys(f.neq, keyMap, prefix); err != nil {
+		return err
+	}
+	if err := replaceMapKeys(f.gt, keyMap, prefix); err != nil {
+		return err
+	}
+	if err := replaceMapKeys(f.gte, keyMap, prefix); err != nil {
+		return err
+	}
+	if err := replaceMapKeys(f.lt, keyMap, prefix); err != nil {
+		return err
+	}
+	if err := replaceMapKeys(f.lte, keyMap, prefix); err != nil {
+		return err
+	}
+	if err := replaceMapKeys(f.in, keyMap, prefix); err != nil {
+		return err
+	}
+	if err := replaceMapKeys(f.substring, keyMap, prefix); err != nil {
+		return err
+	}
+	return nil
+}
+
+// SetCaseInsensitiveFields rebuilds derived comparison metadata from the server's
+// model definition. Call this when restoring a page-token filter: older tokens
+// omit this metadata, and client-supplied metadata must not choose semantics.
+// Predicate keys are already qualified and are left unchanged.
+func (f *Filter) SetCaseInsensitiveFields(keyMap map[string]string, prefix string, caseInsensitiveAPIFields map[string]struct{}) {
+	if prefix != "" {
+		prefix += "."
+	}
+	f.caseInsensitiveKeys = nil
+	// Build the case-insensitive key set using qualified column names.
+	if len(caseInsensitiveAPIFields) > 0 {
+		f.caseInsensitiveKeys = make(map[string]struct{})
+		for apiField := range caseInsensitiveAPIFields {
+			if colName, ok := keyMap[apiField]; ok {
+				f.caseInsensitiveKeys[prefix+colName] = struct{}{}
+			}
+		}
+	}
+}
+
+// Replaces string keys in a map and adds a prefix.
+func replaceMapKeys(m map[string][]interface{}, keyMap map[string]string, prefix string) error {
+	keys := make([]string, 0)
+	for k := range m {
+		keys = append(keys, k)
+	}
+	for _, k := range keys {
+		newKey, ok := keyMap[k]
+		if !ok {
+			return util.NewInvalidInputError("no support for filtering on unrecognized field %q", k)
+		}
+		m[prefix+newKey] = m[k]
+		delete(m, k)
+	}
+	return nil
+}
+
+func (f *Filter) FilterK8sPipelines(pipeline v2beta1.Pipeline) (bool, error) {
+	return f.matchesFilter(func(k string) interface{} { return pipeline.GetField(k) })
+}
+
+func (f *Filter) FilterK8sPipelineVersions(pipelineVersion v2beta1.PipelineVersion) (bool, error) {
+	return f.matchesFilter(func(k string) interface{} { return pipelineVersion.GetField(k) })
+}
+
+// matchesFilter applies client-side filtering with AND semantics across predicate groups.
+// The getField function should return the value of the given key on the object being filtered.
+func (f *Filter) matchesFilter(getField func(string) interface{}) (bool, error) {
+	// EQ: all specified equals must hold.
+	for k := range f.eq {
+		fieldVal := fmt.Sprint(getField(k))
+		for _, v := range f.eq[k] {
+			if f.isCaseInsensitive(k) {
+				if !strings.EqualFold(fieldVal, fmt.Sprint(v)) {
+					return false, nil
+				}
+			} else {
+				if fieldVal != fmt.Sprint(v) {
+					return false, nil
+				}
+			}
+		}
+	}
+
+	// NEQ: none of the specified values may match (NOT IN semantics).
+	for k := range f.neq {
+		fieldVal := fmt.Sprint(getField(k))
+		for _, v := range f.neq[k] {
+			if f.isCaseInsensitive(k) {
+				if strings.EqualFold(fieldVal, fmt.Sprint(v)) {
+					return false, nil
+				}
+			} else {
+				if fieldVal == fmt.Sprint(v) {
+					return false, nil
+				}
+			}
+		}
+	}
+
+	if len(f.gt) > 0 {
+		return false, util.NewInvalidInputError("%s", fmt.Sprintf(filterMessage, "gt"))
+	}
+
+	if len(f.gte) > 0 {
+		return false, util.NewInvalidInputError("%s", fmt.Sprintf(filterMessage, "gte"))
+	}
+
+	if len(f.lt) > 0 {
+		return false, util.NewInvalidInputError("%s", fmt.Sprintf(filterMessage, "lt"))
+	}
+
+	if len(f.lte) > 0 {
+		return false, util.NewInvalidInputError("%s", fmt.Sprintf(filterMessage, "lte"))
+	}
+
+	// IN: field must be a member of all provided IN lists for the same key (AND semantics across lists)
+	for k := range f.in {
+		fieldVal := fmt.Sprint(getField(k))
+		caseInsensitive := f.isCaseInsensitive(k)
+		for _, list := range f.in[k] {
+			inOne := false
+			rv := reflect.ValueOf(list)
+			if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+				return false, nil
+			}
+			for i := 0; i < rv.Len(); i++ {
+				elemVal := fmt.Sprint(rv.Index(i).Interface())
+				if caseInsensitive {
+					if strings.EqualFold(fieldVal, elemVal) {
+						inOne = true
+						break
+					}
+				} else {
+					if fieldVal == elemVal {
+						inOne = true
+						break
+					}
+				}
+			}
+			if !inOne {
+				return false, nil
+			}
+		}
+	}
+
+	// SUBSTRING: all specified substrings must be present.
+	for k := range f.substring {
+		lowerFieldVal := strings.ToLower(fmt.Sprint(getField(k)))
+		for _, v := range f.substring[k] {
+			if !strings.Contains(lowerFieldVal, strings.ToLower(fmt.Sprint(v))) {
+				return false, nil
+			}
+		}
+	}
+
+	// If no checks failed, the item matches the filter.
+	return true, nil
+}
+
+// QualifyIdentifier quotes identifiers correctly when they are qualified with dots,
+// e.g. "experiments.Name" -> `"experiments"."Name"` (or the dialect's quote style).
+// If there is no dot, it simply quotes the key.
+func QualifyIdentifier(q dialect.QuoteFunction, key string) string {
+	if q == nil {
+		panic("quote function must not be nil: caller must provide a dialect-aware identifier quoter")
+	}
+	if strings.Contains(key, ".") {
+		parts := strings.Split(key, ".")
+		for i := range parts {
+			parts[i] = q(parts[i])
+		}
+		return strings.Join(parts, ".")
+	}
+	return q(key)
 }
 
 // AddToSelect builds a WHERE clause from the Filter f, adds it to the supplied
 // SelectBuilder object and returns it for use in SQL queries.
-func (f *Filter) AddToSelect(sb squirrel.SelectBuilder) squirrel.SelectBuilder {
-	if len(f.eq) > 0 {
-		sb = sb.Where(squirrel.Eq(f.eq))
+func (f *Filter) AddToSelect(sb squirrel.SelectBuilder, quote dialect.QuoteFunction) squirrel.SelectBuilder {
+	if quote == nil {
+		panic("quote function must not be nil: caller must provide a dialect-aware identifier quoter")
 	}
 
-	if len(f.neq) > 0 {
-		sb = sb.Where(squirrel.NotEq(f.neq))
-	}
+	var andExprs []squirrel.Sqlizer
 
-	if len(f.gt) > 0 {
-		sb = sb.Where(squirrel.Gt(f.gt))
-	}
-
-	if len(f.gte) > 0 {
-		sb = sb.Where(squirrel.GtOrEq(f.gte))
-	}
-
-	if len(f.lt) > 0 {
-		sb = sb.Where(squirrel.Lt(f.lt))
-	}
-
-	if len(f.lte) > 0 {
-		sb = sb.Where(squirrel.LtOrEq(f.lte))
-	}
-
-	// In
-	if len(f.in) > 0 {
-		sb = sb.Where(squirrel.Eq(f.in))
-	}
-
-	if len(f.substring) > 0 {
-		like := make(squirrel.Like)
-		// Modify each string value v so it looks like %v% so we are doing a substring
-		// match with the LIKE operator.
-		for k, v := range f.substring {
-			like[k] = fmt.Sprintf("%%%s%%", v)
+	for k, vs := range f.eq {
+		for _, v := range vs {
+			if s, ok := v.(string); ok && f.isCaseInsensitive(k) {
+				col := QualifyIdentifier(quote, k)
+				andExprs = append(andExprs, squirrel.Expr(
+					fmt.Sprintf("LOWER(%s) = LOWER(?)", col), s,
+				))
+			} else {
+				andExprs = append(andExprs, squirrel.Eq{QualifyIdentifier(quote, k): v})
+			}
 		}
-		sb = sb.Where(like)
+	}
+
+	for k, vs := range f.neq {
+		for _, v := range vs {
+			if s, ok := v.(string); ok && f.isCaseInsensitive(k) {
+				col := QualifyIdentifier(quote, k)
+				andExprs = append(andExprs, squirrel.Expr(
+					fmt.Sprintf("LOWER(%s) <> LOWER(?)", col), s,
+				))
+			} else {
+				andExprs = append(andExprs, squirrel.NotEq{QualifyIdentifier(quote, k): v})
+			}
+		}
+	}
+
+	for k, vs := range f.gt {
+		for _, v := range vs {
+			andExprs = append(andExprs, squirrel.Gt{QualifyIdentifier(quote, k): v})
+		}
+	}
+
+	for k, vs := range f.gte {
+		for _, v := range vs {
+			andExprs = append(andExprs, squirrel.GtOrEq{QualifyIdentifier(quote, k): v})
+		}
+	}
+
+	for k, vs := range f.lt {
+		for _, v := range vs {
+			andExprs = append(andExprs, squirrel.Lt{QualifyIdentifier(quote, k): v})
+		}
+	}
+
+	for k, vs := range f.lte {
+		for _, v := range vs {
+			andExprs = append(andExprs, squirrel.LtOrEq{QualifyIdentifier(quote, k): v})
+		}
+	}
+
+	for k, vs := range f.in {
+		for _, v := range vs {
+			switch ss := v.(type) {
+			case []string:
+				// An empty list must not produce "IN ()", which is invalid SQL
+				// in both MySQL and PostgreSQL. Emit a match-nothing predicate
+				// instead, matching squirrel.Eq's behavior for empty slices.
+				if len(ss) == 0 {
+					andExprs = append(andExprs, squirrel.Expr("1 = 0"))
+					continue
+				}
+				if f.isCaseInsensitive(k) {
+					col := QualifyIdentifier(quote, k)
+					placeholders := make([]string, len(ss))
+					args := make([]interface{}, len(ss))
+					for i, s := range ss {
+						placeholders[i] = "LOWER(?)"
+						args[i] = s
+					}
+					andExprs = append(andExprs, squirrel.Expr(
+						fmt.Sprintf("LOWER(%s) IN (%s)", col, strings.Join(placeholders, ", ")),
+						args...,
+					))
+				} else {
+					andExprs = append(andExprs, squirrel.Eq{QualifyIdentifier(quote, k): ss})
+				}
+			default:
+				// squirrel.Eq renders an empty slice as a match-nothing
+				// predicate ("(1=0)"), so empty int lists are handled here.
+				andExprs = append(andExprs, squirrel.Eq{QualifyIdentifier(quote, k): v})
+			}
+		}
+	}
+
+	for k, vs := range f.substring {
+		for _, v := range vs {
+			col := QualifyIdentifier(quote, k)
+			andExprs = append(andExprs, squirrel.Expr(
+				fmt.Sprintf("LOWER(%s) LIKE LOWER(?)", col),
+				fmt.Sprintf("%%%s%%", v),
+			))
+		}
+	}
+
+	if len(andExprs) > 0 {
+		return sb.Where(squirrel.And(andExprs))
 	}
 
 	return sb
 }
 
-func checkPredicate(p *api.Predicate) error {
-	switch p.Op {
-	case api.Predicate_IN:
-		switch t := p.Value.(type) {
-		case *api.Predicate_IntValue, *api.Predicate_LongValue, *api.Predicate_StringValue, *api.Predicate_TimestampValue:
+func checkPredicate(p *Predicate) error {
+	switch p.operation {
+	case apiv2.Predicate_IN.String():
+		// An empty list is intentionally allowed. It produces a match-nothing
+		// predicate in AddToSelect (see the IN handling there), preserving the
+		// historical behavior of returning an empty result page rather than an
+		// error for clients that build filters from an empty selection.
+		switch t := p.value.(type) {
+		case int32, int64, string:
 			return util.NewInvalidInputError("cannot use IN operator with scalar type %T", t)
 		}
-
-	case api.Predicate_EQUALS, api.Predicate_NOT_EQUALS, api.Predicate_GREATER_THAN, api.Predicate_GREATER_THAN_EQUALS, api.Predicate_LESS_THAN, api.Predicate_LESS_THAN_EQUALS:
-		switch t := p.Value.(type) {
-		case *api.Predicate_IntValues, *api.Predicate_LongValues, *api.Predicate_StringValues:
-			return util.NewInvalidInputError("cannot use scalar operator %v on array type %T", p.Op, t)
+	case apiv2.Predicate_EQUALS.String(), apiv2.Predicate_NOT_EQUALS.String(), apiv2.Predicate_GREATER_THAN.String(), apiv2.Predicate_GREATER_THAN_EQUALS.String(), apiv2.Predicate_LESS_THAN.String(), apiv2.Predicate_LESS_THAN_EQUALS.String():
+		switch t := p.value.(type) {
+		case []int32, []int64, []string:
+			return util.NewInvalidInputError("cannot use scalar operator %v on array type %T", p.operation, t)
 		}
-
-	case api.Predicate_IS_SUBSTRING:
-		switch t := p.Value.(type) {
-		case *api.Predicate_StringValue:
+	case apiv2.Predicate_IS_SUBSTRING.String():
+		switch t := p.value.(type) {
+		case string:
 			return nil
 		default:
-			return util.NewInvalidInputError("cannot use non string value type %T with operator %v", p.Op, t)
+			return util.NewInvalidInputError("cannot use non string value type %T with operator %v", p.operation, t)
 		}
-
 	default:
-		return util.NewInvalidInputError("invalid predicate operation: %v", p.Op)
+		return util.NewInvalidInputError("invalid predicate operation: %v", p.operation)
 	}
 
 	return nil
 }
 
-func (f *Filter) parseFilterProto() error {
-	for _, pred := range f.filterProto.Predicates {
+func (f *Filter) parsePredicates(preds []*Predicate) error {
+	for _, pred := range preds {
 		if err := checkPredicate(pred); err != nil {
 			return err
 		}
-
-		var m map[string]interface{}
-		switch pred.Op {
-		case api.Predicate_EQUALS:
-			m = f.eq
-		case api.Predicate_NOT_EQUALS:
-			m = f.neq
-		case api.Predicate_GREATER_THAN:
-			m = f.gt
-		case api.Predicate_GREATER_THAN_EQUALS:
-			m = f.gte
-		case api.Predicate_LESS_THAN:
-			m = f.lt
-		case api.Predicate_LESS_THAN_EQUALS:
-			m = f.lte
-		case api.Predicate_IN:
-			m = f.in
-		case api.Predicate_IS_SUBSTRING:
-			m = f.substring
+		switch pred.operation {
+		case "EQUALS":
+			f.eq[pred.key] = append(f.eq[pred.key], pred.value)
+		case "NOT_EQUALS":
+			f.neq[pred.key] = append(f.neq[pred.key], pred.value)
+		case "GREATER_THAN":
+			f.gt[pred.key] = append(f.gt[pred.key], pred.value)
+		case "GREATER_THAN_EQUALS":
+			f.gte[pred.key] = append(f.gte[pred.key], pred.value)
+		case "LESS_THAN":
+			f.lt[pred.key] = append(f.lt[pred.key], pred.value)
+		case "LESS_THAN_EQUALS":
+			f.lte[pred.key] = append(f.lte[pred.key], pred.value)
+		case "IN":
+			f.in[pred.key] = append(f.in[pred.key], pred.value)
+		case "IS_SUBSTRING":
+			f.substring[pred.key] = append(f.substring[pred.key], pred.value)
 		default:
-			return util.NewInvalidInputError("invalid predicate operation: %v", pred.Op)
-		}
-
-		if err := addPredicateValue(m, pred); err != nil {
-			return err
+			return util.NewInvalidInputError("invalid predicate operation: %v", pred.operation)
 		}
 	}
 
 	return nil
 }
 
-func addPredicateValue(m map[string]interface{}, p *api.Predicate) error {
-	switch t := p.Value.(type) {
-	case *api.Predicate_IntValue:
-		m[p.Key] = p.GetIntValue()
-	case *api.Predicate_LongValue:
-		m[p.Key] = p.GetLongValue()
-	case *api.Predicate_StringValue:
-		m[p.Key] = p.GetStringValue()
-	case *api.Predicate_TimestampValue:
-		ts, err := ptypes.Timestamp(p.GetTimestampValue())
-		if err != nil {
-			return util.NewInvalidInputError("invalid timestamp: %v", err)
+func toPredicates(filterProto *apiv2.Filter) ([]*Predicate, error) {
+	predicates := make([]*Predicate, 0)
+	for _, p := range filterProto.GetPredicates() {
+		if pred, err := toPredicate(p); err != nil {
+			return nil, err
+		} else {
+			predicates = append(predicates, pred)
 		}
-		m[p.Key] = ts.Unix()
+	}
+	return predicates, nil
+}
 
-	case *api.Predicate_IntValues:
-		var v []int32
-		for _, i := range p.GetIntValues().GetValues() {
-			v = append(v, i)
-		}
-		m[p.Key] = v
+func toPredicate(p *apiv2.Predicate) (*Predicate, error) {
+	if p == nil {
+		return nil, nil
+	}
+	operation := ""
+	key := p.GetKey()
+	var value interface{}
+	if temp, err := toOperation(p.GetOperation()); err != nil {
+		return nil, err
+	} else {
+		operation = temp
+	}
+	if temp, err := toValue(p.GetValue()); err != nil {
+		return nil, err
+	} else {
+		value = temp
+	}
+	if key == "" {
+		return nil, util.NewInvalidInputError("Predicate key cannot be empty for operation %v and value %v", operation, value)
+	}
+	return &Predicate{
+		operation: operation,
+		key:       key,
+		value:     value,
+	}, nil
+}
 
-	case *api.Predicate_LongValues:
-		var v []int64
-		for _, i := range p.GetLongValues().GetValues() {
-			v = append(v, i)
-		}
-		m[p.Key] = v
+func toOperation(o interface{}) (string, error) {
+	switch o {
+	case apiv2.Predicate_EQUALS:
+		return "EQUALS", nil
+	case apiv2.Predicate_NOT_EQUALS:
+		return "NOT_EQUALS", nil
+	case apiv2.Predicate_GREATER_THAN:
+		return "GREATER_THAN", nil
+	case apiv2.Predicate_GREATER_THAN_EQUALS:
+		return "GREATER_THAN_EQUALS", nil
+	case apiv2.Predicate_LESS_THAN:
+		return "LESS_THAN", nil
+	case apiv2.Predicate_LESS_THAN_EQUALS:
+		return "LESS_THAN_EQUALS", nil
+	case apiv2.Predicate_IN:
+		return "IN", nil
+	case apiv2.Predicate_IS_SUBSTRING:
+		return "IS_SUBSTRING", nil
+	default:
+		return "", util.NewUnknownApiVersionError("Filter.Predicate.Operation", o)
+	}
+}
 
-	case *api.Predicate_StringValues:
-		var v []string
-		for _, i := range p.GetStringValues().GetValues() {
-			v = append(v, i)
-		}
-		m[p.Key] = v
-
-	case nil:
-		return util.NewInvalidInputError("no value set for predicate on key %q", p.Key)
+func toValue(v interface{}) (interface{}, error) {
+	switch v := v.(type) {
+	case *apiv2.Predicate_IntValue:
+		return v.IntValue, nil
+	case *apiv2.Predicate_LongValue:
+		return v.LongValue, nil
+	case *apiv2.Predicate_StringValue:
+		return v.StringValue, nil
+	case *apiv2.Predicate_TimestampValue:
+		return v.TimestampValue.AsTime().Unix(), nil
+	case *apiv2.Predicate_IntValues_:
+		return v.IntValues.GetValues(), nil
+	case *apiv2.Predicate_StringValues_:
+		return v.StringValues.GetValues(), nil
+	case *apiv2.Predicate_LongValues_:
+		return v.LongValues.GetValues(), nil
 
 	default:
-		return util.NewInvalidInputError("unknown value type in Filter for predicate key %q: %T", p.Key, t)
+		return nil, util.NewUnknownApiVersionError("Filter.Predicate.Value", v)
 	}
-
-	return nil
 }

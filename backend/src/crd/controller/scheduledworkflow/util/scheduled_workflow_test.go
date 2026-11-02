@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,17 +15,20 @@
 package util
 
 import (
+	"encoding/json"
 	"math"
 	"strconv"
 	"testing"
 	"time"
 
-	workflowapi "github.com/argoproj/argo/pkg/apis/workflow/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+
+	workflowapi "github.com/argoproj/argo-workflows/v4/pkg/apis/workflow/v1alpha1"
 	commonutil "github.com/kubeflow/pipelines/backend/src/common/util"
 	swfapi "github.com/kubeflow/pipelines/backend/src/crd/pkg/apis/scheduledworkflow/v1beta1"
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kubernetes/pkg/apis/core"
 )
 
 func TestScheduledWorkflow_maxConcurrency(t *testing.T) {
@@ -110,10 +113,10 @@ func TestScheduledWorkflow_lastIndex(t *testing.T) {
 	assert.Equal(t, int64(50), schedule.lastIndex())
 }
 
-func TestScheduledWorkflow_nextIndex(t *testing.T) {
+func TestScheduledWorkflow_NextIndex(t *testing.T) {
 	// Never ran a workflow
 	schedule := NewScheduledWorkflow(&swfapi.ScheduledWorkflow{})
-	assert.Equal(t, int64(1), schedule.nextIndex())
+	assert.Equal(t, int64(1), schedule.NextIndex())
 
 	// Ran one workflow
 	schedule = NewScheduledWorkflow(&swfapi.ScheduledWorkflow{
@@ -123,7 +126,7 @@ func TestScheduledWorkflow_nextIndex(t *testing.T) {
 			},
 		},
 	})
-	assert.Equal(t, int64(51), schedule.nextIndex())
+	assert.Equal(t, int64(51), schedule.NextIndex())
 }
 
 func TestScheduledWorkflow_MinIndex(t *testing.T) {
@@ -226,7 +229,7 @@ func TestScheduledWorkflow_GetNextScheduledEpoch_OneTimeRun(t *testing.T) {
 		},
 	})
 	nextScheduledEpoch, mustRunNow := schedule.GetNextScheduledEpoch(
-		int64(0) /* active workflow count */, nowEpoch)
+		int64(0) /* active workflow count */, nowEpoch, time.Location{})
 	assert.Equal(t, true, mustRunNow)
 	assert.Equal(t, creationTimestamp.Unix(), nextScheduledEpoch)
 
@@ -245,7 +248,7 @@ func TestScheduledWorkflow_GetNextScheduledEpoch_OneTimeRun(t *testing.T) {
 		},
 	})
 	nextScheduledEpoch, mustRunNow = schedule.GetNextScheduledEpoch(
-		int64(0) /* active workflow count */, nowEpoch)
+		int64(0) /* active workflow count */, nowEpoch, time.Location{})
 	assert.Equal(t, false, mustRunNow)
 	assert.Equal(t, never, nextScheduledEpoch)
 
@@ -259,7 +262,7 @@ func TestScheduledWorkflow_GetNextScheduledEpoch_OneTimeRun(t *testing.T) {
 		},
 	})
 	nextScheduledEpoch, mustRunNow = schedule.GetNextScheduledEpoch(
-		int64(0) /* active workflow count */, pastEpoch)
+		int64(0) /* active workflow count */, pastEpoch, time.Location{})
 	assert.Equal(t, false, mustRunNow)
 	assert.Equal(t, creationTimestamp.Unix(), nextScheduledEpoch)
 
@@ -273,7 +276,7 @@ func TestScheduledWorkflow_GetNextScheduledEpoch_OneTimeRun(t *testing.T) {
 		},
 	})
 	nextScheduledEpoch, mustRunNow = schedule.GetNextScheduledEpoch(
-		int64(0) /* active workflow count */, nowEpoch)
+		int64(0) /* active workflow count */, nowEpoch, time.Location{})
 	assert.Equal(t, false, mustRunNow)
 	assert.Equal(t, creationTimestamp.Unix(), nextScheduledEpoch)
 
@@ -287,9 +290,95 @@ func TestScheduledWorkflow_GetNextScheduledEpoch_OneTimeRun(t *testing.T) {
 		},
 	})
 	nextScheduledEpoch, mustRunNow = schedule.GetNextScheduledEpoch(
-		int64(1) /* active workflow count */, nowEpoch)
+		int64(1) /* active workflow count */, nowEpoch, time.Location{})
 	assert.Equal(t, false, mustRunNow)
 	assert.Equal(t, creationTimestamp.Unix(), nextScheduledEpoch)
+}
+
+func TestScheduledWorkflow_GetNextScheduledEpoch_CronScheduleTimeZone(t *testing.T) {
+	locationString := "America/Los_Angeles"
+	viper.Set(TimeZone, locationString)
+	defer viper.Set(TimeZone, "")
+
+	location, err := time.LoadLocation(locationString)
+	assert.Nil(t, err)
+	nowTime, err := time.Parse(time.RFC1123Z, "Mon, 03 Jan 2006 14:04:05 -0800")
+	assert.Nil(t, err)
+	nowEpoch := nowTime.Unix()
+
+	creationTime, err := time.Parse(time.RFC1123Z, "Mon, 01 Jan 2006 16:04:05 -0800")
+	assert.Nil(t, err)
+	creationTimestamp := metav1.NewTime(creationTime)
+	// catchUp := false
+	schedule := NewScheduledWorkflow(&swfapi.ScheduledWorkflow{
+		ObjectMeta: metav1.ObjectMeta{
+			CreationTimestamp: creationTimestamp,
+		},
+		Spec: swfapi.ScheduledWorkflowSpec{
+			Enabled: true,
+			//NoCatchup:      &catchUp,
+			MaxConcurrency: commonutil.Int64Pointer(int64(10)),
+			Trigger: swfapi.Trigger{
+				CronSchedule: &swfapi.CronSchedule{
+					Cron: "* * 15 * * *", // trigger 15:00 every day
+				},
+			},
+		},
+	})
+
+	// Must run later
+	nextScheduledEpoch, mustRunNow := schedule.GetNextScheduledEpoch(
+		int64(9) /* active workflow count */, nowEpoch, *location)
+
+	assert.Equal(t, true, mustRunNow)
+	nextRun, err := time.Parse(time.RFC1123Z, "Mon, 02 Jan 2006 15:00:00 -0800")
+	assert.Nil(t, err)
+	assert.Equal(t, nextRun.Unix(), nextScheduledEpoch)
+}
+
+func TestScheduledWorkflow_GetNextScheduledEpoch_CronScheduleTimeZoneEndTime(t *testing.T) {
+	// This needs to be set since otherwise the local will be used which will differ between
+	// where the tests are run.
+	locationString := "America/Los_Angeles"
+	viper.Set(TimeZone, locationString)
+	defer viper.Set(TimeZone, "")
+
+	location, err := time.LoadLocation(locationString)
+	assert.Nil(t, err)
+	nowTime, err := time.Parse(time.RFC1123Z, "Mon, 02 Jan 2006 14:04:05 -0800")
+	assert.Nil(t, err)
+	nowEpoch := nowTime.Unix()
+
+	creationTime, err := time.Parse(time.RFC1123Z, "Mon, 01 Jan 2006 16:04:05 -0800")
+	assert.Nil(t, err)
+	creationTimestamp := metav1.NewTime(creationTime)
+
+	endTimestamp := metav1.NewTime(nowTime.Add(time.Second * 60 * 30))
+	schedule := NewScheduledWorkflow(&swfapi.ScheduledWorkflow{
+		ObjectMeta: metav1.ObjectMeta{
+			CreationTimestamp: creationTimestamp,
+		},
+		Spec: swfapi.ScheduledWorkflowSpec{
+			Enabled: true,
+			//NoCatchup:      &catchUp,
+			MaxConcurrency: commonutil.Int64Pointer(int64(10)),
+			Trigger: swfapi.Trigger{
+				CronSchedule: &swfapi.CronSchedule{
+					Cron:    "* * 15 * * *", // trigger 15:00 every day
+					EndTime: &endTimestamp,
+				},
+			},
+		},
+	})
+
+	// Must run later
+	nextScheduledEpoch, mustRunNow := schedule.GetNextScheduledEpoch(
+		int64(9) /* active workflow count */, nowEpoch, *location)
+
+	assert.Equal(t, false, mustRunNow)
+	nextRun := time.Unix(1<<63-62135596801, 0)
+	assert.Nil(t, err)
+	assert.Equal(t, nextRun.Unix(), nextScheduledEpoch)
 }
 
 func TestScheduledWorkflow_GetNextScheduledEpoch_CronSchedule(t *testing.T) {
@@ -308,27 +397,75 @@ func TestScheduledWorkflow_GetNextScheduledEpoch_CronSchedule(t *testing.T) {
 			MaxConcurrency: commonutil.Int64Pointer(int64(10)),
 			Trigger: swfapi.Trigger{
 				CronSchedule: &swfapi.CronSchedule{
-					Cron: "0 * * * * *",
+					Cron: "0 * * * * *", // trigger every minute
 				},
 			},
 		},
 	})
 	nextScheduledEpoch, mustRunNow := schedule.GetNextScheduledEpoch(
-		int64(9) /* active workflow count */, nowEpoch)
+		int64(9) /* active workflow count */, nowEpoch, time.Location{})
 	assert.Equal(t, true, mustRunNow)
 	assert.Equal(t, int64(9*hour+minute), nextScheduledEpoch)
 
 	// Must run later
 	nextScheduledEpoch, mustRunNow = schedule.GetNextScheduledEpoch(
-		int64(9) /* active workflow count */, pastEpoch)
+		int64(9) /* active workflow count */, pastEpoch, time.Location{})
 	assert.Equal(t, false, mustRunNow)
 	assert.Equal(t, int64(9*hour+minute), nextScheduledEpoch)
 
 	// Cannot run because of concurrency
 	nextScheduledEpoch, mustRunNow = schedule.GetNextScheduledEpoch(
-		int64(10) /* active workflow count */, nowEpoch)
+		int64(10) /* active workflow count */, nowEpoch, time.Location{})
 	assert.Equal(t, false, mustRunNow)
 	assert.Equal(t, int64(9*hour+minute), nextScheduledEpoch)
+}
+
+func TestScheduledWorkflow_GetNextScheduledEpoch_CronSchedule_Fail(t *testing.T) {
+	// Augment the cluster to be in UTC
+	defaultLocation := "UTC"
+	viper.Set(TimeZone, defaultLocation)
+	defer viper.Set(TimeZone, "")
+	clusterLocation, err := GetLocation()
+	assert.Nil(t, err)
+
+	// Augment the user to be in Los Angeles
+
+	userLocation, err := time.LoadLocation("America/Los_Angeles")
+	assert.Nil(t, err)
+
+	// user and cluster in different timezone
+	assert.NotEqual(t, userLocation, clusterLocation)
+
+	nowTime, err := time.Parse(time.RFC1123Z, "Mon, 03 Jan 2006 14:04:05 -0800")
+	assert.Nil(t, err)
+	nowEpoch := nowTime.Unix()
+	creationTime, err := time.Parse(time.RFC1123Z, "Mon, 01 Jan 2006 16:04:05 -0800")
+	assert.Nil(t, err)
+	creationTimestamp := metav1.NewTime(creationTime)
+
+	schedule := NewScheduledWorkflow(&swfapi.ScheduledWorkflow{
+		ObjectMeta: metav1.ObjectMeta{
+			CreationTimestamp: creationTimestamp,
+		},
+		Spec: swfapi.ScheduledWorkflowSpec{
+			Enabled:        true,
+			MaxConcurrency: commonutil.Int64Pointer(int64(10)),
+			Trigger: swfapi.Trigger{
+				CronSchedule: &swfapi.CronSchedule{
+					Cron: "* * 15 * * *", // trigger 15:00 every day
+				},
+			},
+		},
+	})
+
+	// Must run later
+	nextScheduledEpoch, mustRunNow := schedule.GetNextScheduledEpoch(
+		int64(9) /* active workflow count */, nowEpoch, *clusterLocation)
+
+	assert.Equal(t, true, mustRunNow)
+	nextRun, err := time.Parse(time.RFC1123Z, "Mon, 03 Jan 2006 15:00:00 -0800")
+	assert.Nil(t, err)
+	assert.NotEqual(t, nextRun, time.Unix(nextScheduledEpoch, 0))
 }
 
 func TestScheduledWorkflow_GetNextScheduledEpoch_PeriodicSchedule(t *testing.T) {
@@ -353,19 +490,19 @@ func TestScheduledWorkflow_GetNextScheduledEpoch_PeriodicSchedule(t *testing.T) 
 		},
 	})
 	nextScheduledEpoch, mustRunNow := schedule.GetNextScheduledEpoch(
-		int64(9) /* active workflow count */, nowEpoch)
+		int64(9) /* active workflow count */, nowEpoch, time.Location{})
 	assert.Equal(t, true, mustRunNow)
 	assert.Equal(t, int64(9*hour+minute), nextScheduledEpoch)
 
 	// Must run later
 	nextScheduledEpoch, mustRunNow = schedule.GetNextScheduledEpoch(
-		int64(9) /* active workflow count */, pastEpoch)
+		int64(9) /* active workflow count */, pastEpoch, time.Location{})
 	assert.Equal(t, false, mustRunNow)
 	assert.Equal(t, int64(9*hour+minute), nextScheduledEpoch)
 
 	// Cannot run because of concurrency
 	nextScheduledEpoch, mustRunNow = schedule.GetNextScheduledEpoch(
-		int64(10) /* active workflow count */, nowEpoch)
+		int64(10) /* active workflow count */, nowEpoch, time.Location{})
 	assert.Equal(t, false, mustRunNow)
 	assert.Equal(t, int64(9*hour+minute), nextScheduledEpoch)
 
@@ -374,7 +511,6 @@ func TestScheduledWorkflow_GetNextScheduledEpoch_PeriodicSchedule(t *testing.T) 
 func TestScheduledWorkflow_GetNextScheduledEpoch_UpdateStatus_NoWorkflow(t *testing.T) {
 	// Must run now
 	scheduledEpoch := int64(10 * hour)
-	updatedEpoch := int64(11 * hour)
 	creationTimestamp := metav1.NewTime(time.Unix(9*hour, 0).UTC())
 
 	schedule := NewScheduledWorkflow(&swfapi.ScheduledWorkflow{
@@ -398,11 +534,10 @@ func TestScheduledWorkflow_GetNextScheduledEpoch_UpdateStatus_NoWorkflow(t *test
 	status4 := createStatus("WORKFLOW4", 4)
 
 	schedule.UpdateStatus(
-		updatedEpoch,
-		nil, /* no workflow created during this run */
+		false, /* no workflow created during this run */
 		scheduledEpoch,
 		[]swfapi.WorkflowStatus{*status1, *status2, *status3},
-		[]swfapi.WorkflowStatus{*status1, *status2, *status3, *status4})
+		[]swfapi.WorkflowStatus{*status1, *status2, *status3, *status4}, &time.Location{})
 
 	expected := &swfapi.ScheduledWorkflow{
 		ObjectMeta: metav1.ObjectMeta{
@@ -423,12 +558,10 @@ func TestScheduledWorkflow_GetNextScheduledEpoch_UpdateStatus_NoWorkflow(t *test
 		},
 		Status: swfapi.ScheduledWorkflowStatus{
 			Conditions: []swfapi.ScheduledWorkflowCondition{{
-				Type:               swfapi.ScheduledWorkflowEnabled,
-				Status:             core.ConditionTrue,
-				LastProbeTime:      metav1.NewTime(time.Unix(updatedEpoch, 0).UTC()),
-				LastTransitionTime: metav1.NewTime(time.Unix(updatedEpoch, 0).UTC()),
-				Reason:             string(swfapi.ScheduledWorkflowEnabled),
-				Message:            "The schedule is enabled.",
+				Type:    swfapi.ScheduledWorkflowEnabled,
+				Status:  corev1.ConditionTrue,
+				Reason:  string(swfapi.ScheduledWorkflowEnabled),
+				Message: "The schedule is enabled.",
 			},
 			},
 			WorkflowHistory: &swfapi.WorkflowHistory{
@@ -455,7 +588,6 @@ func createStatus(workflowName string, scheduledEpoch int64) *swfapi.WorkflowSta
 func TestScheduledWorkflow_GetNextScheduledEpoch_UpdateStatus_WithWorkflow(t *testing.T) {
 	// Must run now
 	scheduledEpoch := int64(10 * hour)
-	updatedEpoch := int64(11 * hour)
 	creationTimestamp := metav1.NewTime(time.Unix(9*hour, 0).UTC())
 
 	schedule := NewScheduledWorkflow(&swfapi.ScheduledWorkflow{
@@ -478,14 +610,11 @@ func TestScheduledWorkflow_GetNextScheduledEpoch_UpdateStatus_WithWorkflow(t *te
 	status3 := createStatus("WORKFLOW3", 7)
 	status4 := createStatus("WORKFLOW4", 4)
 
-	workflow := commonutil.NewWorkflow(&workflowapi.Workflow{})
-
 	schedule.UpdateStatus(
-		updatedEpoch,
-		workflow, /* no workflow created during this run */
+		true, /* workflow created during this run */
 		scheduledEpoch,
 		[]swfapi.WorkflowStatus{*status1, *status2, *status3},
-		[]swfapi.WorkflowStatus{*status1, *status2, *status3, *status4})
+		[]swfapi.WorkflowStatus{*status1, *status2, *status3, *status4}, &time.Location{})
 
 	expected := &swfapi.ScheduledWorkflow{
 		ObjectMeta: metav1.ObjectMeta{
@@ -506,12 +635,10 @@ func TestScheduledWorkflow_GetNextScheduledEpoch_UpdateStatus_WithWorkflow(t *te
 		},
 		Status: swfapi.ScheduledWorkflowStatus{
 			Conditions: []swfapi.ScheduledWorkflowCondition{{
-				Type:               swfapi.ScheduledWorkflowEnabled,
-				Status:             core.ConditionTrue,
-				LastProbeTime:      metav1.NewTime(time.Unix(updatedEpoch, 0).UTC()),
-				LastTransitionTime: metav1.NewTime(time.Unix(updatedEpoch, 0).UTC()),
-				Reason:             string(swfapi.ScheduledWorkflowEnabled),
-				Message:            "The schedule is enabled.",
+				Type:    swfapi.ScheduledWorkflowEnabled,
+				Status:  corev1.ConditionTrue,
+				Reason:  string(swfapi.ScheduledWorkflowEnabled),
+				Message: "The schedule is enabled.",
 			}},
 			WorkflowHistory: &swfapi.WorkflowHistory{
 				Active:    []swfapi.WorkflowStatus{*status3, *status1, *status2},
@@ -531,147 +658,229 @@ func TestScheduledWorkflow_GetNextScheduledEpoch_UpdateStatus_WithWorkflow(t *te
 }
 
 func TestScheduledWorkflow_NewWorkflow(t *testing.T) {
-	// Must run now
-	scheduledEpoch := int64(10 * hour)
-	nowEpoch := int64(11 * hour)
-	creationTimestamp := metav1.NewTime(time.Unix(9*hour, 0).UTC())
 
-	schedule := NewScheduledWorkflow(&swfapi.ScheduledWorkflow{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "SCHEDULE1",
-			CreationTimestamp: creationTimestamp,
-		},
-		Spec: swfapi.ScheduledWorkflowSpec{
-			Enabled:        true,
-			MaxConcurrency: commonutil.Int64Pointer(int64(10)),
-			Trigger: swfapi.Trigger{
-				PeriodicSchedule: &swfapi.PeriodicSchedule{
-					IntervalSecond: int64(60),
+	tests := []struct {
+		name          string
+		executionSpec interface{}
+	}{
+		{
+			"passing workflow.spec (for backward-compatible with previously created swf)",
+			workflowapi.WorkflowSpec{
+				ServiceAccountName: "SERVICE_ACCOUNT",
+				Arguments: workflowapi.Arguments{
+					Parameters: []workflowapi.Parameter{
+						{Name: "PARAM1", Value: workflowapi.AnyStringPtr("VALUE1")},
+						{Name: "PARAM2", Value: workflowapi.AnyStringPtr("VALUE2")},
+					},
 				},
 			},
-			Workflow: &swfapi.WorkflowResource{
-				Parameters: []swfapi.Parameter{
-					{Name: "PARAM1", Value: "NEW_VALUE1"},
-					{Name: "PARAM3", Value: "NEW_VALUE3"},
+		},
+		{
+			"passing workflow (new way for v2)",
+			workflowapi.Workflow{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "SCHEDULE1",
 				},
 				Spec: workflowapi.WorkflowSpec{
 					ServiceAccountName: "SERVICE_ACCOUNT",
 					Arguments: workflowapi.Arguments{
 						Parameters: []workflowapi.Parameter{
-							{Name: "PARAM1", Value: commonutil.StringPointer("VALUE1")},
-							{Name: "PARAM2", Value: commonutil.StringPointer("VALUE2")},
+							{Name: "PARAM1", Value: workflowapi.AnyStringPtr("VALUE1")},
+							{Name: "PARAM2", Value: workflowapi.AnyStringPtr("VALUE2")},
 						},
 					},
 				},
 			},
 		},
-	})
-
-	result := schedule.NewWorkflow(scheduledEpoch, nowEpoch)
-
-	expected := &workflowapi.Workflow{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Workflow",
-			APIVersion: "argoproj.io/v1alpha1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "SCHEDULE1-1-3321103997",
-			Labels: map[string]string{
-				"scheduledworkflows.kubeflow.org/isOwnedByScheduledWorkflow": "true",
-				"scheduledworkflows.kubeflow.org/scheduledWorkflowName":      "SCHEDULE1",
-				"scheduledworkflows.kubeflow.org/workflowEpoch":              strconv.Itoa(int(scheduledEpoch)),
-				"scheduledworkflows.kubeflow.org/workflowIndex":              "1"},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion:         "kubeflow.org/v1beta1",
-				Kind:               "ScheduledWorkflow",
-				Name:               "SCHEDULE1",
-				UID:                "",
-				Controller:         commonutil.BooleanPointer(true),
-				BlockOwnerDeletion: commonutil.BooleanPointer(true)}},
-		},
-		Spec: workflowapi.WorkflowSpec{
-			ServiceAccountName: "SERVICE_ACCOUNT",
-			Arguments: workflowapi.Arguments{
-				Parameters: []workflowapi.Parameter{
-					{Name: "PARAM1", Value: commonutil.StringPointer("NEW_VALUE1")},
-					{Name: "PARAM2", Value: commonutil.StringPointer("VALUE2")},
-				},
-			},
-		},
 	}
 
-	assert.Equal(t, expected, result.Get())
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+
+			// Must run now
+			scheduledEpoch := int64(10 * hour)
+			nowEpoch := int64(11 * hour)
+			creationTimestamp := metav1.NewTime(time.Unix(9*hour, 0).UTC())
+
+			spec, err := json.Marshal(test.executionSpec)
+			assert.Nil(t, err)
+
+			schedule := ScheduledWorkflow{&swfapi.ScheduledWorkflow{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "SCHEDULE1",
+					CreationTimestamp: creationTimestamp,
+				},
+				Spec: swfapi.ScheduledWorkflowSpec{
+					Enabled:        true,
+					MaxConcurrency: commonutil.Int64Pointer(int64(10)),
+					Trigger: swfapi.Trigger{
+						PeriodicSchedule: &swfapi.PeriodicSchedule{
+							IntervalSecond: int64(60),
+						},
+					},
+					Workflow: &swfapi.WorkflowResource{
+						Parameters: []swfapi.Parameter{
+							{Name: "PARAM1", Value: "NEW_VALUE1"},
+							{Name: "PARAM3", Value: "NEW_VALUE3"},
+						},
+						Spec: string(spec),
+					},
+				},
+			}, commonutil.NewFakeUUIDGeneratorOrFatal("123e4567-e89b-12d3-a456-426655440001", nil)}
+
+			result, err := schedule.NewWorkflow(scheduledEpoch, nowEpoch)
+			assert.Nil(t, err)
+
+			expected := &workflowapi.Workflow{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "Workflow",
+					APIVersion: "argoproj.io/v1alpha1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "SCHEDULE1-1-3321103997",
+					Labels: map[string]string{
+						"pipeline/runid": "123e4567-e89b-12d3-a456-426655440001",
+						"scheduledworkflows.kubeflow.org/isOwnedByScheduledWorkflow": "true",
+						"scheduledworkflows.kubeflow.org/scheduledWorkflowName":      "SCHEDULE1",
+						"scheduledworkflows.kubeflow.org/workflowEpoch":              strconv.Itoa(int(scheduledEpoch)),
+						"scheduledworkflows.kubeflow.org/workflowIndex":              "1"},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion:         "kubeflow.org/v1beta1",
+						Kind:               "ScheduledWorkflow",
+						Name:               "SCHEDULE1",
+						UID:                "",
+						Controller:         commonutil.BooleanPointer(true),
+						BlockOwnerDeletion: commonutil.BooleanPointer(true)}},
+				},
+				Spec: workflowapi.WorkflowSpec{
+					PodMetadata: &workflowapi.Metadata{
+						Labels: map[string]string{"pipeline/runid": "123e4567-e89b-12d3-a456-426655440001"},
+					},
+					ServiceAccountName: "SERVICE_ACCOUNT",
+					Arguments: workflowapi.Arguments{
+						Parameters: []workflowapi.Parameter{
+							{Name: "PARAM1", Value: workflowapi.AnyStringPtr("NEW_VALUE1")},
+							{Name: "PARAM2", Value: workflowapi.AnyStringPtr("VALUE2")},
+						},
+					},
+				},
+			}
+
+			assert.Equal(t, expected, result.(*commonutil.Workflow).Get())
+
+		})
+	}
 }
 
 func TestScheduledWorkflow_NewWorkflow_Parameterized(t *testing.T) {
-	// Must run now
-	scheduledEpoch := int64(10 * hour)
-	nowEpoch := int64(11 * hour)
-	creationTimestamp := metav1.NewTime(time.Unix(9*hour, 0).UTC())
 
-	schedule := NewScheduledWorkflow(&swfapi.ScheduledWorkflow{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "SCHEDULE1",
-			CreationTimestamp: creationTimestamp,
-		},
-		Spec: swfapi.ScheduledWorkflowSpec{
-			Enabled:        true,
-			MaxConcurrency: commonutil.Int64Pointer(int64(10)),
-			Trigger: swfapi.Trigger{
-				PeriodicSchedule: &swfapi.PeriodicSchedule{
-					IntervalSecond: int64(60),
+	tests := []struct {
+		name          string
+		executionSpec interface{}
+	}{
+		{
+			"passing workflow.spec (for backward-compatible with previously created swf)",
+			workflowapi.WorkflowSpec{
+				ServiceAccountName: "SERVICE_ACCOUNT",
+				Arguments: workflowapi.Arguments{
+					Parameters: []workflowapi.Parameter{
+						{Name: "PARAM1", Value: workflowapi.AnyStringPtr("VALUE1")},
+						{Name: "PARAM2", Value: workflowapi.AnyStringPtr("VALUE2")},
+					},
 				},
 			},
-			Workflow: &swfapi.WorkflowResource{
-				Parameters: []swfapi.Parameter{
-					{Name: "PARAM1", Value: "NEW_VALUE1_[[ScheduledTime]]"},
-					{Name: "PARAM2", Value: "NEW_VALUE2_[[Index]]"},
+		},
+		{
+			"passing workflow (new way for v2)",
+			workflowapi.Workflow{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "SCHEDULE1",
 				},
 				Spec: workflowapi.WorkflowSpec{
 					ServiceAccountName: "SERVICE_ACCOUNT",
 					Arguments: workflowapi.Arguments{
 						Parameters: []workflowapi.Parameter{
-							{Name: "PARAM1", Value: commonutil.StringPointer("VALUE1")},
-							{Name: "PARAM2", Value: commonutil.StringPointer("VALUE2")},
+							{Name: "PARAM1", Value: workflowapi.AnyStringPtr("VALUE1")},
+							{Name: "PARAM2", Value: workflowapi.AnyStringPtr("VALUE2")},
 						},
 					},
 				},
 			},
 		},
-	})
-
-	result := schedule.NewWorkflow(scheduledEpoch, nowEpoch)
-
-	expected := &workflowapi.Workflow{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Workflow",
-			APIVersion: "argoproj.io/v1alpha1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "SCHEDULE1-1-3321103997",
-			Labels: map[string]string{
-				"scheduledworkflows.kubeflow.org/isOwnedByScheduledWorkflow": "true",
-				"scheduledworkflows.kubeflow.org/scheduledWorkflowName":      "SCHEDULE1",
-				"scheduledworkflows.kubeflow.org/workflowEpoch":              strconv.Itoa(int(scheduledEpoch)),
-				"scheduledworkflows.kubeflow.org/workflowIndex":              "1"},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion:         "kubeflow.org/v1beta1",
-				Kind:               "ScheduledWorkflow",
-				Name:               "SCHEDULE1",
-				UID:                "",
-				Controller:         commonutil.BooleanPointer(true),
-				BlockOwnerDeletion: commonutil.BooleanPointer(true)}},
-		},
-		Spec: workflowapi.WorkflowSpec{
-			ServiceAccountName: "SERVICE_ACCOUNT",
-			Arguments: workflowapi.Arguments{
-				Parameters: []workflowapi.Parameter{
-					{Name: "PARAM1", Value: commonutil.StringPointer("NEW_VALUE1_19700101100000")},
-					{Name: "PARAM2", Value: commonutil.StringPointer("NEW_VALUE2_1")},
-				},
-			},
-		},
 	}
 
-	assert.Equal(t, expected, result.Get())
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Must run now
+			scheduledEpoch := int64(10 * hour)
+			nowEpoch := int64(11 * hour)
+			creationTimestamp := metav1.NewTime(time.Unix(9*hour, 0).UTC())
+
+			spec, err := json.Marshal(test.executionSpec)
+			assert.Nil(t, err)
+
+			schedule := ScheduledWorkflow{&swfapi.ScheduledWorkflow{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "SCHEDULE1",
+					CreationTimestamp: creationTimestamp,
+				},
+				Spec: swfapi.ScheduledWorkflowSpec{
+					Enabled:        true,
+					MaxConcurrency: commonutil.Int64Pointer(int64(10)),
+					Trigger: swfapi.Trigger{
+						PeriodicSchedule: &swfapi.PeriodicSchedule{
+							IntervalSecond: int64(60),
+						},
+					},
+					Workflow: &swfapi.WorkflowResource{
+						Parameters: []swfapi.Parameter{
+							{Name: "PARAM1", Value: "NEW_VALUE1_[[ScheduledTime]]"},
+							{Name: "PARAM2", Value: "NEW_VALUE2_[[Index]]"},
+						},
+						Spec: string(spec),
+					},
+				},
+			}, commonutil.NewFakeUUIDGeneratorOrFatal("123e4567-e89b-12d3-a456-426655440001", nil)}
+
+			result, err := schedule.NewWorkflow(scheduledEpoch, nowEpoch)
+			assert.Nil(t, err)
+			expected := &workflowapi.Workflow{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "Workflow",
+					APIVersion: "argoproj.io/v1alpha1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "SCHEDULE1-1-3321103997",
+					Labels: map[string]string{
+						"pipeline/runid": "123e4567-e89b-12d3-a456-426655440001",
+						"scheduledworkflows.kubeflow.org/isOwnedByScheduledWorkflow": "true",
+						"scheduledworkflows.kubeflow.org/scheduledWorkflowName":      "SCHEDULE1",
+						"scheduledworkflows.kubeflow.org/workflowEpoch":              strconv.Itoa(int(scheduledEpoch)),
+						"scheduledworkflows.kubeflow.org/workflowIndex":              "1"},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion:         "kubeflow.org/v1beta1",
+						Kind:               "ScheduledWorkflow",
+						Name:               "SCHEDULE1",
+						UID:                "",
+						Controller:         commonutil.BooleanPointer(true),
+						BlockOwnerDeletion: commonutil.BooleanPointer(true)}},
+				},
+				Spec: workflowapi.WorkflowSpec{
+					PodMetadata: &workflowapi.Metadata{
+						Labels: map[string]string{"pipeline/runid": "123e4567-e89b-12d3-a456-426655440001"},
+					},
+					ServiceAccountName: "SERVICE_ACCOUNT",
+					Arguments: workflowapi.Arguments{
+						Parameters: []workflowapi.Parameter{
+							{Name: "PARAM1", Value: workflowapi.AnyStringPtr("NEW_VALUE1_19700101100000")},
+							{Name: "PARAM2", Value: workflowapi.AnyStringPtr("NEW_VALUE2_1")},
+						},
+					},
+				},
+			}
+
+			assert.Equal(t, expected, result.(*commonutil.Workflow).Get())
+
+		})
+	}
 }

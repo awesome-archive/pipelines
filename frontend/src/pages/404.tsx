@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,20 +14,20 @@
  * limitations under the License.
  */
 
-import * as React from 'react';
+import type * as React from 'react';
 import { Page } from './Page';
 import { ToolbarProps } from '../components/Toolbar';
 
 export default class Page404 extends Page<{}, {}> {
   public getInitialToolbarState(): ToolbarProps {
-    return { actions: [], breadcrumbs: [], pageTitle: '' };
+    return { actions: {}, breadcrumbs: [], pageTitle: '' };
   }
 
   public async refresh(): Promise<void> {
     return;
   }
 
-  public render(): JSX.Element {
+  public render(): React.JSX.Element {
     return (
       <div style={{ margin: '100px auto', textAlign: 'center' }}>
         <div style={{ color: '#aaa', fontSize: 50, fontWeight: 'bold' }}>404</div>

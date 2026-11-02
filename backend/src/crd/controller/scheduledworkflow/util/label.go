@@ -1,7 +1,7 @@
 package util
 
 import (
-	"github.com/argoproj/argo/workflow/common"
+	"github.com/argoproj/argo-workflows/v4/workflow/common"
 	commonutil "github.com/kubeflow/pipelines/backend/src/common/util"
 	log "github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/labels"
@@ -12,7 +12,7 @@ import (
 // whether a workflow is completed.
 func GetRequirementForCompletedWorkflowOrFatal(completed bool) *labels.Requirement {
 	operator := selection.NotEquals
-	if completed == true {
+	if completed {
 		operator = selection.Equals
 	}
 	req, err := labels.NewRequirement(common.LabelKeyCompleted, operator,

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,19 +13,49 @@
 // limitations under the License.
 
 import * as express from 'express';
+import { Response } from 'express-serve-static-core';
 import * as fs from 'fs';
 import * as _path from 'path';
-import RunUtils from '../src/lib/RunUtils';
-import helloWorldRuntime from './integration-test-runtime';
-import proxyMiddleware from '../server/proxy-middleware';
-import { ApiFilter, PredicateOp } from '../src/apis/filter/api';
-import { ApiListExperimentsResponse, ApiExperiment } from '../src/apis/experiment';
-import { ApiListJobsResponse, ApiJob } from '../src/apis/job';
-import { ApiListPipelinesResponse, ApiPipeline } from '../src/apis/pipeline';
-import { ApiListRunsResponse, ApiResourceType, ApiRun } from '../src/apis/run';
-import { ExperimentSortKeys, PipelineSortKeys, RunSortKeys } from '../src/lib/Apis';
-import { Response } from 'express-serve-static-core';
-import { data as fixedData, namedPipelines } from './fixed-data';
+import { ArtifactArtifactType, V2Artifact, V2ArtifactTask, V2IOType } from '../src/apisv2/artifact';
+import {
+  V2Experiment,
+  V2ExperimentStorageState,
+  V2ListExperimentsResponse,
+} from '../src/apisv2/experiment';
+import { V2Filter, V2PredicateOperation } from '../src/apisv2/filter';
+import {
+  V2ListPipelineVersionsResponse,
+  V2ListPipelinesResponse,
+  V2Pipeline,
+  V2PipelineVersion,
+} from '../src/apisv2/pipeline';
+import {
+  V2ListRecurringRunsResponse,
+  V2RecurringRun,
+  V2RecurringRunStatus,
+  V2Trigger,
+} from '../src/apisv2/recurringrun';
+import {
+  PipelineTaskTaskPodType,
+  PipelineTaskTaskState,
+  PipelineTaskTaskType,
+  V2ListRunsResponse,
+  V2PipelineTask,
+  V2Run,
+  V2RunStorageState,
+  V2RuntimeState,
+} from '../src/apisv2/run';
+import {
+  ExperimentSortKeys,
+  JobSortKeys,
+  PipelineSortKeys,
+  PipelineVersionSortKeys,
+  RunSortKeys,
+} from '../src/lib/Apis';
+import { data as fixedData } from './fixed-data';
+import registerTensorboardProxy from './tensorboard-proxy';
+import datasetPreview from './data/v2/artifact-previews/dataset.json';
+import modelPreview from './data/v2/artifact-previews/model.json';
 
 const rocMetadataJsonPath = './eval-output/metadata.json';
 const rocMetadataJsonPath2 = './eval-output/metadata2.json';
@@ -38,7 +68,157 @@ const confusionMatrixPath = './model-output/confusion_matrix.csv';
 const helloWorldHtmlPath = './model-output/hello-world.html';
 const helloWorldBigHtmlPath = './model-output/hello-world-big.html';
 
-const v1beta1Prefix = '/apis/v1beta1';
+const v2Prefix = '/apis/v2';
+const mockNativeRunId = 'e0115ac1-0479-4194-a22d-01e65e09a32b';
+
+const mockV2Artifacts: V2Artifact[] = [
+  {
+    artifact_id: 'mock-artifact-1',
+    created_at: new Date('2026-01-01T00:00:00.000Z'),
+    description: 'Representative native artifact for local frontend development.',
+    name: 'mock-dataset',
+    namespace: 'kubeflow-user-example-com',
+    type: ArtifactArtifactType.Dataset,
+    uri: 's3://mlpipeline/private-artifacts/kubeflow-user-example-com/mock-run/mock-dataset',
+    metadata: { _kfp_preview: { version: 1, path: '_kfp_preview.json' } },
+  },
+  {
+    artifact_id: 'mock-model-1',
+    name: 'mock-model',
+    namespace: 'kubeflow-user-example-com',
+    type: ArtifactArtifactType.Model,
+    uri: 's3://mlpipeline/private-artifacts/kubeflow-user-example-com/mock-run/mock-model',
+    metadata: { _kfp_preview: { version: 2, storage: 'sibling' } },
+  },
+];
+const mockV2Tasks: V2PipelineTask[] = [
+  {
+    child_tasks: [
+      { name: 'chicago-taxi-trips-dataset', task_id: 'mock-task-producer' },
+      { name: 'convert-csv-to-apache-parquet', task_id: 'mock-task-consumer' },
+      { name: 'xgboost-train', task_id: 'mock-task-trainer' },
+    ],
+    create_time: new Date('2026-01-01T00:00:00.000Z'),
+    display_name: 'xgboost-sample-pipeline',
+    end_time: new Date('2026-01-01T00:03:00.000Z'),
+    name: 'root',
+    run_id: mockNativeRunId,
+    scope_path: 'root',
+    state: PipelineTaskTaskState.SUCCEEDED,
+    task_id: 'mock-task-root',
+    type: PipelineTaskTaskType.ROOT,
+  },
+  {
+    create_time: new Date('2026-01-01T00:00:10.000Z'),
+    display_name: 'Chicago taxi trips dataset',
+    end_time: new Date('2026-01-01T00:01:00.000Z'),
+    name: 'chicago-taxi-trips-dataset',
+    outputs: {
+      artifacts: [
+        {
+          artifact_key: 'table',
+          artifacts: [mockV2Artifacts[0]],
+          type: V2IOType.OUTPUT,
+        },
+      ],
+    },
+    parent_task_id: 'mock-task-root',
+    pods: [
+      {
+        name: 'mock-chicago-taxi-trips-dataset-executor',
+        type: PipelineTaskTaskPodType.EXECUTOR,
+        uid: 'mock-producer-pod-uid',
+      },
+    ],
+    run_id: mockNativeRunId,
+    scope_path: 'root.chicago-taxi-trips-dataset',
+    state: PipelineTaskTaskState.SUCCEEDED,
+    task_id: 'mock-task-producer',
+    type: PipelineTaskTaskType.RUNTIME,
+  },
+  {
+    create_time: new Date('2026-01-01T00:01:05.000Z'),
+    display_name: 'Convert CSV to Apache Parquet',
+    end_time: new Date('2026-01-01T00:02:00.000Z'),
+    inputs: {
+      artifacts: [
+        {
+          artifact_key: 'data',
+          artifacts: [mockV2Artifacts[0]],
+          producer: { task_name: 'chicago-taxi-trips-dataset' },
+          type: V2IOType.TASK_OUTPUT_INPUT,
+        },
+      ],
+    },
+    name: 'convert-csv-to-apache-parquet',
+    parent_task_id: 'mock-task-root',
+    pods: [
+      {
+        name: 'mock-convert-csv-to-apache-parquet-driver',
+        type: PipelineTaskTaskPodType.DRIVER,
+        uid: 'mock-consumer-driver-pod-uid',
+      },
+      {
+        name: 'mock-convert-csv-to-apache-parquet-executor',
+        type: PipelineTaskTaskPodType.EXECUTOR,
+        uid: 'mock-consumer-executor-pod-uid',
+      },
+    ],
+    run_id: mockNativeRunId,
+    scope_path: 'root.convert-csv-to-apache-parquet',
+    state: PipelineTaskTaskState.SUCCEEDED,
+    task_id: 'mock-task-consumer',
+    type: PipelineTaskTaskType.RUNTIME,
+  },
+  {
+    create_time: new Date('2026-01-01T00:02:05.000Z'),
+    display_name: 'XGBoost train',
+    end_time: new Date('2026-01-01T00:02:30.000Z'),
+    name: 'xgboost-train',
+    outputs: {
+      artifacts: [
+        {
+          artifact_key: 'model',
+          artifacts: [mockV2Artifacts[1]],
+          type: V2IOType.OUTPUT,
+        },
+      ],
+    },
+    parent_task_id: 'mock-task-root',
+    run_id: mockNativeRunId,
+    scope_path: 'root.xgboost-train',
+    state: PipelineTaskTaskState.SUCCEEDED,
+    task_id: 'mock-task-trainer',
+    type: PipelineTaskTaskType.RUNTIME,
+  },
+];
+const mockV2ArtifactTasks: V2ArtifactTask[] = [
+  {
+    artifact_id: 'mock-model-1',
+    id: 'mock-model-task-output',
+    key: 'model',
+    run_id: mockNativeRunId,
+    task_id: 'mock-task-trainer',
+    type: V2IOType.OUTPUT,
+  },
+  {
+    artifact_id: 'mock-artifact-1',
+    id: 'mock-artifact-task-output',
+    key: 'table',
+    run_id: mockNativeRunId,
+    task_id: 'mock-task-producer',
+    type: V2IOType.OUTPUT,
+  },
+  {
+    artifact_id: 'mock-artifact-1',
+    id: 'mock-artifact-task-input',
+    key: 'data',
+    producer: { task_name: 'chicago-taxi-trips-dataset' },
+    run_id: mockNativeRunId,
+    task_id: 'mock-task-consumer',
+    type: V2IOType.TASK_OUTPUT_INPUT,
+  },
+];
 
 let tensorboardPod = '';
 
@@ -51,145 +231,251 @@ interface BaseResource {
   error?: string;
 }
 
+interface V2FilterableResource {
+  created_at?: Date;
+  display_name?: string;
+  name?: string;
+  storage_state?: string;
+}
+
+function getQueryString(queryParam: unknown): string | undefined {
+  if (typeof queryParam === 'string') {
+    return queryParam;
+  }
+  if (Array.isArray(queryParam)) {
+    return queryParam.find((value): value is string => typeof value === 'string');
+  }
+  return undefined;
+}
+
+function getQueryNumber(queryParam: unknown): number | undefined {
+  const queryString = getQueryString(queryParam);
+  if (queryString === undefined || queryString === '') {
+    return undefined;
+  }
+  const queryNumber = Number(queryString);
+  return Number.isNaN(queryNumber) ? undefined : queryNumber;
+}
+
+function getDecodedQueryString(queryParam: unknown): string | undefined {
+  const queryString = getQueryString(queryParam);
+  if (queryString === undefined) {
+    return undefined;
+  }
+  try {
+    return decodeURIComponent(queryString);
+  } catch {
+    return undefined;
+  }
+}
+
+function getRequiredDecodedQueryString(
+  res: Response,
+  queryParam: unknown,
+  queryParamName: string,
+): string | undefined {
+  const queryString = getQueryString(queryParam);
+  if (queryString === undefined || queryString === '') {
+    res.status(400).send(`${queryParamName} argument is required`);
+    return undefined;
+  }
+
+  let decodedQueryString: string;
+  try {
+    decodedQueryString = decodeURIComponent(queryString);
+  } catch {
+    res.status(400).send(`${queryParamName} argument is invalid`);
+    return undefined;
+  }
+
+  if (decodedQueryString === '') {
+    res.status(400).send(`${queryParamName} argument is required`);
+    return undefined;
+  }
+
+  return decodedQueryString;
+}
+
+function getMockBackendFilePath(relativePath: string): string {
+  return _path.resolve(process.cwd(), 'mock-backend', relativePath);
+}
+
+function sendMockBackendFile(res: Response, relativePath: string): void {
+  res.send(fs.readFileSync(getMockBackendFilePath(relativePath), 'utf-8'));
+}
+
+function getSortKeyAndOrder(
+  defaultSortKey: string,
+  queryParam?: string,
+): { desc: boolean; key: string } {
+  let key = defaultSortKey;
+  let desc = false;
+
+  if (queryParam) {
+    const keyParts = queryParam.split(' ');
+    key = keyParts[0];
+
+    // Check that the key is properly formatted.
+    if (
+      keyParts.length > 2 ||
+      (keyParts.length === 2 && keyParts[1] !== 'asc' && keyParts[1] !== 'desc')
+    ) {
+      throw new Error(`Invalid sort string: ${queryParam}`);
+    }
+
+    desc = keyParts.length === 2 && keyParts[1] === 'desc';
+  }
+  return { desc, key };
+}
+
+function getV2ResourceValue(resource: V2FilterableResource, key: string): unknown {
+  if (key === 'name') {
+    return resource.name || resource.display_name;
+  }
+  if (key === 'display_name') {
+    return resource.display_name || resource.name;
+  }
+  return (resource as Record<string, unknown>)[key];
+}
+
+function getComparableValue(value: unknown): number | string {
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+  if (typeof value === 'number') {
+    return value;
+  }
+  return String(value || '');
+}
+
+function sortResources<T>(
+  resources: T[],
+  defaultSortKey: string,
+  queryParam: string | undefined,
+  getValue: (resource: T, key: string) => unknown,
+): T[] {
+  const { desc, key } = getSortKeyAndOrder(defaultSortKey, queryParam);
+  return resources.slice().sort((a, b) => {
+    const aValue = getComparableValue(getValue(a, key));
+    const bValue = getComparableValue(getValue(b, key));
+    let result = 0;
+    if (aValue < bValue) {
+      result = -1;
+    }
+    if (aValue > bValue) {
+      result = 1;
+    }
+    return result * (desc ? -1 : 1);
+  });
+}
+
+function sortV2Resources<T extends V2FilterableResource>(
+  resources: T[],
+  defaultSortKey: string,
+  queryParam?: string,
+): T[] {
+  return sortResources(resources, defaultSortKey, queryParam, getV2ResourceValue);
+}
+
+function filterV2Resources<T extends V2FilterableResource>(
+  resources: T[],
+  filterString?: string,
+): T[] {
+  if (!filterString) {
+    return resources;
+  }
+  const filter: V2Filter = JSON.parse(decodeURIComponent(filterString));
+  return ((filter && filter.predicates) || []).reduce((filteredResources, predicate) => {
+    const key = predicate.key || '';
+    const stringValue = predicate.string_value || '';
+    switch (predicate.operation) {
+      case V2PredicateOperation.EQUALS:
+        return filteredResources.filter(
+          (resource) => String(getV2ResourceValue(resource, key) || '') === stringValue,
+        );
+      case V2PredicateOperation.NOT_EQUALS:
+        return filteredResources.filter(
+          (resource) => String(getV2ResourceValue(resource, key) || '') !== stringValue,
+        );
+      case V2PredicateOperation.IS_SUBSTRING:
+        return filteredResources.filter((resource) =>
+          String(getV2ResourceValue(resource, key) || '')
+            .toLocaleLowerCase()
+            .includes(stringValue.toLocaleLowerCase()),
+        );
+      default:
+        throw new Error(`Operation: ${predicate.operation} is not yet supported by the mock API`);
+    }
+  }, resources);
+}
+
+function getPage<T>(
+  resources: T[],
+  pageTokenQueryParam: unknown,
+  pageSizeQueryParam: unknown,
+): { nextPageToken: string; page: T[] } {
+  const start = getQueryNumber(pageTokenQueryParam) || 0;
+  const end = start + (getQueryNumber(pageSizeQueryParam) || 20);
+  return {
+    nextPageToken: end < resources.length ? end + '' : '',
+    page: resources.slice(start, end),
+  };
+}
+
+function getV2PipelineVersions(pipelineId: string): V2PipelineVersion[] {
+  return fixedData.versions.filter((version) => version.pipeline_id === pipelineId);
+}
+function getV2PipelineVersion(pipelineId: string, versionId: string) {
+  return getV2PipelineVersions(pipelineId).find(
+    (version) => version.pipeline_version_id === versionId,
+  );
+}
+
 // tslint:disable-next-line:no-default-export
 export default (app: express.Application) => {
-
   app.use((req, _, next) => {
     // tslint:disable-next-line:no-console
     console.info(req.method + ' ' + req.originalUrl);
     next();
   });
 
-  proxyMiddleware(app as any, v1beta1Prefix);
+  registerTensorboardProxy(app as any);
 
   app.set('json spaces', 2);
   app.use(express.json());
 
-  app.get(v1beta1Prefix + '/healthz', (_, res) => {
+  app.get(v2Prefix + '/healthz', (_, res) => {
     res.header('Content-Type', 'application/json');
     res.send({
       apiServerCommitHash: 'd3c4add0a95e930c70a330466d0923827784eb9a',
+      apiServerMultiUser: false,
       apiServerReady: true,
       buildDate: 'Wed Jan 9 19:40:24 UTC 2019',
-      frontendCommitHash: '8efb2fcff9f666ba5b101647e909dc9c6889cecb'
+      frontendCommitHash: '8efb2fcff9f666ba5b101647e909dc9c6889cecb',
+      pipelineStore: 'database',
     });
   });
 
-  app.get('/hub/', (_, res) => {
-    res.sendStatus(200);
-  }); 
-
-  function getSortKeyAndOrder(defaultSortKey: string, queryParam?: string): { desc: boolean, key: string } {
-    let key = defaultSortKey;
-    let desc = false;
-
-    if (queryParam) {
-      const keyParts = queryParam.split(' ');
-      key = keyParts[0];
-
-      // Check that the key is properly formatted.
-      if (keyParts.length > 2 ||
-        (keyParts.length === 2 && keyParts[1] !== 'asc' && keyParts[1] !== 'desc')) {
-        throw new Error(`Invalid sort string: ${queryParam}`);
-      }
-
-      desc = keyParts.length === 2 && keyParts[1] === 'desc';
-    }
-    return { desc, key };
-  }
-
-  app.get(v1beta1Prefix + '/jobs', (req, res) => {
+  app.get(v2Prefix + '/experiments', (req, res) => {
     res.header('Content-Type', 'application/json');
-    // Note: the way that we use the next_page_token here may not reflect the way the backend works.
-    const response: ApiListJobsResponse = {
-      jobs: [],
-      next_page_token: '',
+    const experiments = sortV2Resources(
+      filterV2Resources(fixedData.experiments, getQueryString(req.query.filter)),
+      ExperimentSortKeys.NAME,
+      getQueryString(req.query.sort_by),
+    );
+    const page = getPage(experiments, req.query.page_token, req.query.page_size);
+    const response: V2ListExperimentsResponse = {
+      experiments: page.page,
+      next_page_token: page.nextPageToken,
+      total_size: experiments.length,
     };
-
-    let jobs: ApiJob[] = fixedData.jobs;
-    if (req.query.filter) {
-      jobs = filterResources(fixedData.jobs, req.query.filter);
-    }
-
-    const { desc, key } = getSortKeyAndOrder(ExperimentSortKeys.CREATED_AT, req.query.sort_by);
-
-    jobs.sort((a, b) => {
-      let result = 1;
-      if (a[key]! < b[key]!) {
-        result = -1;
-      }
-      if (a[key]! === b[key]!) {
-        result = 0;
-      }
-      return result * (desc ? -1 : 1);
-    });
-
-    const start = (req.query.page_token ? +req.query.page_token : 0);
-    const end = start + (+req.query.page_size || 20);
-    response.jobs = jobs.slice(start, end);
-
-    if (end < jobs.length) {
-      response.next_page_token = end + '';
-    }
 
     res.json(response);
   });
 
-  app.get(v1beta1Prefix + '/experiments', (req, res) => {
+  app.get(v2Prefix + '/experiments/:eid', (req, res) => {
     res.header('Content-Type', 'application/json');
-    // Note: the way that we use the next_page_token here may not reflect the way the backend works.
-    const response: ApiListExperimentsResponse = {
-      experiments: [],
-      next_page_token: '',
-    };
-
-    let experiments: ApiExperiment[] = fixedData.experiments;
-    if (req.query.filter) {
-      experiments = filterResources(fixedData.experiments, req.query.filter);
-    }
-
-    const { desc, key } = getSortKeyAndOrder(ExperimentSortKeys.NAME, req.query.sortBy);
-
-    experiments.sort((a, b) => {
-      let result = 1;
-      if (a[key]! < b[key]!) {
-        result = -1;
-      }
-      if (a[key]! === b[key]!) {
-        result = 0;
-      }
-      return result * (desc ? -1 : 1);
-    });
-
-    const start = (req.query.pageToken ? +req.query.pageToken : 0);
-    const end = start + (+req.query.pageSize || 20);
-    response.experiments = experiments.slice(start, end);
-
-    if (end < experiments.length) {
-      response.next_page_token = end + '';
-    }
-
-    res.json(response);
-  });
-
-  app.post(v1beta1Prefix + '/experiments', (req, res) => {
-    const experiment: ApiExperiment = req.body;
-    if (fixedData.experiments.find(e => e.name!.toLowerCase() === experiment.name!.toLowerCase())) {
-      res.status(404).send('An experiment with teh same name already exists');
-      return;
-    }
-    experiment.id = 'new-experiment-' + (fixedData.experiments.length + 1);
-    fixedData.experiments.push(experiment);
-
-    setTimeout(() => {
-      res.send(fixedData.experiments[fixedData.experiments.length - 1]);
-    }, 1000);
-  });
-
-
-  app.get(v1beta1Prefix + '/experiments/:eid', (req, res) => {
-    res.header('Content-Type', 'application/json');
-    const experiment = fixedData.experiments.find((exp) => exp.id === req.params.eid);
+    const experiment = fixedData.experiments.find((exp) => exp.experiment_id === req.params.eid);
     if (!experiment) {
       res.status(404).send(`No experiment was found with ID: ${req.params.eid}`);
       return;
@@ -197,318 +483,28 @@ export default (app: express.Application) => {
     res.json(experiment);
   });
 
-  app.options(v1beta1Prefix + '/jobs', (req, res) => {
-    res.send();
-  });
-
-  app.post(v1beta1Prefix + '/jobs', (req, res) => {
-    const job: ApiJob = req.body;
-    job.id = 'new-job-' + (fixedData.jobs.length + 1);
-    job.created_at = new Date();
-    job.updated_at = new Date();
-    job.enabled = !!job.trigger;
-    fixedData.jobs.push(job);
-
-    const date = new Date().toISOString();
-    fixedData.runs.push({
-      pipeline_runtime: {
-        workflow_manifest: JSON.stringify(helloWorldRuntime),
-      },
-      run: {
-        created_at: new Date(),
-        id: 'job-at-' + date,
-        name: 'job-' + job.name + date,
-        scheduled_at: new Date(),
-        status: 'Running',
-      },
-    });
-    setTimeout(() => {
-      res.send(fixedData.jobs[fixedData.jobs.length - 1]);
-    }, 1000);
-  });
-
-  app.all(v1beta1Prefix + '/jobs/:jid', (req, res) => {
+  app.get(v2Prefix + '/pipelines', (req, res) => {
     res.header('Content-Type', 'application/json');
-    switch (req.method) {
-      case 'DELETE':
-        const i = fixedData.jobs.findIndex((j) => j.id === req.params.jid);
-        if (fixedData.jobs[i].name!.startsWith('Cannot be deleted')) {
-          res.status(502).send(`Deletion failed for job: '${fixedData.jobs[i].name}'`);
-        } else {
-          // Delete the job from fixedData.
-          fixedData.jobs.splice(i, 1);
-          res.json({});
-        }
-        break;
-      case 'GET':
-        const job = fixedData.jobs.find((j) => j.id === req.params.jid);
-        if (job) {
-          res.json(job);
-        } else {
-          res.status(404).send(`No job was found with ID: ${req.params.jid}`);
-        }
-        break;
-      default:
-        res.status(405).send('Unsupported request type: ' + req.method);
-    }
-  });
-
-  app.get(v1beta1Prefix + '/jobs/:jid/runs', (req, res) => {
-    res.header('Content-Type', 'application/json');
-    // Note: the way that we use the next_page_token here may not reflect the way the backend works.
-    const response: ApiListRunsResponse = {
-      next_page_token: '',
-      runs: [],
+    const pipelines = sortV2Resources(
+      filterV2Resources(fixedData.pipelines, getQueryString(req.query.filter)),
+      PipelineSortKeys.CREATED_AT,
+      getQueryString(req.query.sort_by),
+    );
+    const page = getPage(pipelines, req.query.page_token, req.query.page_size);
+    const response: V2ListPipelinesResponse = {
+      next_page_token: page.nextPageToken,
+      pipelines: page.page,
+      total_size: pipelines.length,
     };
-
-    let runs: ApiRun[] = fixedData.runs.slice(0, 7).map((r) => r.run!);
-
-    if (req.params.jid.startsWith('new-job-')) {
-      response.runs = runs.slice(0, 1);
-      res.json(response);
-      return;
-    } else if (req.params.jid === '7fc01714-4a13-4c05-5902-a8a72c14253b') { // No runs job
-      res.json(response);
-      return;
-    }
-
-    const job = fixedData.jobs.find((j) => j.id === req.params.jid);
-    if (!job) {
-      res.status(404).send(`No job was found with ID: ${req.params.jid}`);
-      return;
-    }
-
-    if (req.query.filter) {
-      runs = filterResources(runs, req.query.filter);
-    }
-
-    const { desc, key } = getSortKeyAndOrder(RunSortKeys.CREATED_AT, req.query.sort_by);
-
-    runs.sort((a, b) => {
-      let result = 1;
-      if (a[key]! < b[key]!) {
-        result = -1;
-      }
-      if (a[key]! === b[key]!) {
-        result = 0;
-      }
-      return result * (desc ? -1 : 1);
-    });
-
-    const start = (req.query.page_token ? +req.query.page_token : 0);
-    const end = start + (+req.query.page_size || 20);
-    response.runs = runs.slice(start, end);
-
-    if (end < runs.length) {
-      response.next_page_token = end + '';
-    }
 
     res.json(response);
   });
 
-  app.get(v1beta1Prefix + '/runs', (req, res) => {
+  app.get(v2Prefix + '/pipelines/:pid', (req, res) => {
     res.header('Content-Type', 'application/json');
-    // Note: the way that we use the next_page_token here may not reflect the way the backend works.
-    const response: ApiListRunsResponse = {
-      next_page_token: '',
-      runs: [],
-    };
-
-    let runs: ApiRun[] = fixedData.runs.map((r) => r.run!);
-
-    if (req.query.filter) {
-      runs = filterResources(runs, req.query.filter);
-    }
-
-    if (req.query['resource_reference_key.type'] === ApiResourceType.EXPERIMENT) {
-      runs = runs.filter((r) => RunUtils.getAllExperimentReferences(r)
-        .some((ref) => ref.key && ref.key.id && ref.key.id === req.query['resource_reference_key.id'] || false));
-    }
-
-    const { desc, key } = getSortKeyAndOrder(RunSortKeys.CREATED_AT, req.query.sort_by);
-
-    runs.sort((a, b) => {
-      let result = 1;
-      if (a[key]! < b[key]!) {
-        result = -1;
-      }
-      if (a[key]! === b[key]!) {
-        result = 0;
-      }
-      return result * (desc ? -1 : 1);
-    });
-
-    const start = (req.query.page_token ? +req.query.page_token : 0);
-    const end = start + (+req.query.page_size || 20);
-    response.runs = runs.slice(start, end);
-
-    if (end < runs.length) {
-      response.next_page_token = end + '';
-    }
-
-    res.json(response);
-  });
-
-  app.get(v1beta1Prefix + '/runs/:rid', (req, res) => {
-    const rid = req.params.rid;
-    const run = fixedData.runs.find((r) => r.run!.id === rid);
-    if (!run) {
-      res.status(404).send('Cannot find a run with id: ' + rid);
-      return;
-    }
-    res.json(run);
-  });
-
-
-  app.post(v1beta1Prefix + '/runs', (req, res) => {
-    const date = new Date();
-    const run: ApiRun = req.body;
-    run.id = 'new-run-' + (fixedData.runs.length + 1);
-    run.created_at = date;
-    run.scheduled_at = date;
-    run.status = 'Running';
-
-    fixedData.runs.push({
-      pipeline_runtime: {
-        workflow_manifest: JSON.stringify(helloWorldRuntime),
-      },
-      run,
-    });
-    setTimeout(() => {
-      res.send(fixedData.jobs[fixedData.jobs.length - 1]);
-    }, 1000);
-  });
-
-  app.options(v1beta1Prefix + '/jobs/:jid/enable', (req, res) => {
-    res.send();
-  });
-  app.post(v1beta1Prefix + '/jobs/:jid/enable', (req, res) => {
-    setTimeout(() => {
-      const job = fixedData.jobs.find((j) => j.id === req.params.jid);
-      if (job) {
-        job.enabled = true;
-        res.json({});
-      } else {
-        res.status(500).send('Cannot find a job with id ' + req.params.jid);
-      }
-    }, 1000);
-  });
-
-  app.options(v1beta1Prefix + '/jobs/:jid/disable', (req, res) => {
-    res.send();
-  });
-  app.post(v1beta1Prefix + '/jobs/:jid/disable', (req, res) => {
-    setTimeout(() => {
-      const job = fixedData.jobs.find((j) => j.id === req.params.jid);
-      if (job) {
-        job.enabled = false;
-        res.json({});
-      } else {
-        res.status(500).send('Cannot find a job with id ' + req.params.jid);
-      }
-    }, 1000);
-  });
-
-  function filterResources(resources: BaseResource[], filterString?: string): BaseResource[] {
-    if (!filterString) {
-      return resources;
-    }
-    const filter: ApiFilter = JSON.parse(decodeURIComponent(filterString));
-    ((filter && filter.predicates) || []).forEach(p => {
-      resources = resources.filter(r => {
-        switch(p.op) {
-          case PredicateOp.EQUALS:
-            if (p.key !== 'name') {
-              throw new Error(`Key: ${p.key} is not yet supported by the mock API server`);
-            }
-            return r.name && r.name.toLocaleLowerCase() === (p.string_value || '').toLocaleLowerCase();
-          case PredicateOp.ISSUBSTRING:
-            if (p.key !== 'name') {
-              throw new Error(`Key: ${p.key} is not yet supported by the mock API server`);
-            }
-            return r.name && r.name.toLocaleLowerCase().includes((p.string_value || '').toLocaleLowerCase());
-          case PredicateOp.NOTEQUALS:
-            // Fall through
-          case PredicateOp.GREATERTHAN:
-            // Fall through
-          case PredicateOp.GREATERTHANEQUALS:
-            // Fall through
-          case PredicateOp.LESSTHAN:
-            // Fall through
-          case PredicateOp.LESSTHANEQUALS:
-            // Fall through
-            throw new Error(`Op: ${p.op} is not yet supported by the mock API server`);
-          default:
-            throw new Error(`Unknown Predicate op: ${p.op}`);
-        }
-      });
-    });
-    return resources;
-  }
-
-  app.get(v1beta1Prefix + '/pipelines', (req, res) => {
-    res.header('Content-Type', 'application/json');
-    const response: ApiListPipelinesResponse = {
-      next_page_token: '',
-      pipelines: [],
-    };
-
-    let pipelines: ApiPipeline[] = fixedData.pipelines;
-    if (req.query.filter) {
-      pipelines = filterResources(fixedData.pipelines, req.query.filter);
-    }
-
-    const { desc, key } = getSortKeyAndOrder(PipelineSortKeys.CREATED_AT, req.query.sort_by);
-
-    pipelines.sort((a, b) => {
-      let result = 1;
-      if (a[key]! < b[key]!) {
-        result = -1;
-      }
-      if (a[key]! === b[key]!) {
-        result = 0;
-      }
-      return result * (desc ? -1 : 1);
-    });
-
-    const start = (req.query.page_token ? +req.query.page_token : 0);
-    const end = start + (+req.query.page_size || 20);
-    response.pipelines = pipelines.slice(start, end);
-
-    if (end < pipelines.length) {
-      response.next_page_token = end + '';
-    }
-
-    res.json(response);
-  });
-
-  app.delete(v1beta1Prefix + '/pipelines/:pid', (req, res) => {
-    res.header('Content-Type', 'application/json');
-    const i = fixedData.pipelines.findIndex((p) => p.id === req.params.pid);
-
-    if (i === -1) {
-      res.status(404).send(`No pipelines was found with ID: ${req.params.pid}`);
-      return;
-    }
-
-    if (fixedData.pipelines[i].name!.startsWith('Cannot be deleted')) {
-      res.status(502).send(`Deletion failed for pipeline: '${fixedData.pipelines[i].name}'`);
-      return;
-    }
-    // Delete the pipelines from fixedData.
-    fixedData.pipelines.splice(i, 1);
-    res.json({});
-  });
-
-  // Needed to avoid "Response for preflight does not have HTTP ok status." error.
-  app.options(v1beta1Prefix + '/pipelines/:pid', (req, res) => {
-    res.header('Content-Type', 'application/json');
-    res.json({});
-  });
-
-  app.get(v1beta1Prefix + '/pipelines/:pid', (req, res) => {
-    res.header('Content-Type', 'application/json');
-    const pipeline = fixedData.pipelines.find((p) => p.id === req.params.pid);
+    const pipeline = fixedData.pipelines.find(
+      (candidate) => candidate.pipeline_id === req.params.pid,
+    );
     if (!pipeline) {
       res.status(404).send(`No pipeline was found with ID: ${req.params.pid}`);
       return;
@@ -516,87 +512,171 @@ export default (app: express.Application) => {
     res.json(pipeline);
   });
 
-  app.get(v1beta1Prefix + '/pipelines/:pid/templates', (req, res) => {
-    res.header('Content-Type', 'text/x-yaml');
-    const pipeline = fixedData.pipelines.find((p) => p.id === req.params.pid);
-    if (!pipeline) {
-      res.status(404).send(`No pipeline was found with ID: ${req.params.pid}`);
+  app.get<{ pid: string }>(v2Prefix + '/pipelines/:pid/versions', (req, res) => {
+    res.header('Content-Type', 'application/json');
+    const versions = sortV2Resources(
+      filterV2Resources(getV2PipelineVersions(req.params.pid), getQueryString(req.query.filter)),
+      PipelineVersionSortKeys.CREATED_AT,
+      getQueryString(req.query.sort_by),
+    );
+    const page = getPage(versions, req.query.page_token, req.query.page_size);
+    const response: V2ListPipelineVersionsResponse = {
+      next_page_token: page.nextPageToken,
+      pipeline_versions: page.page,
+      total_size: versions.length,
+    };
+
+    res.json(response);
+  });
+
+  app.get<{ pid: string; pvid: string }>(
+    v2Prefix + '/pipelines/:pid/versions/:pvid',
+    (req, res) => {
+      res.header('Content-Type', 'application/json');
+      const version = getV2PipelineVersion(req.params.pid, req.params.pvid);
+      if (!version) {
+        res.status(404).send(`No pipeline version was found with ID: ${req.params.pvid}`);
+        return;
+      }
+      res.json(version);
+    },
+  );
+
+  app.get(v2Prefix + '/runs', (req, res) => {
+    res.header('Content-Type', 'application/json');
+    let runs = fixedData.runs;
+    const experimentId = getQueryString(req.query.experiment_id);
+    if (experimentId) {
+      runs = runs.filter((run) => run.experiment_id === experimentId);
+    }
+    runs = sortV2Resources(
+      filterV2Resources(runs, getQueryString(req.query.filter)),
+      RunSortKeys.CREATED_AT,
+      getQueryString(req.query.sort_by),
+    );
+    const page = getPage(runs, req.query.page_token, req.query.page_size);
+    const response: V2ListRunsResponse = {
+      next_page_token: page.nextPageToken,
+      runs: page.page,
+      total_size: runs.length,
+    };
+
+    res.json(response);
+  });
+
+  app.get(v2Prefix + '/runs/:rid', (req, res) => {
+    res.header('Content-Type', 'application/json');
+    const run = fixedData.runs.find((runDetail) => runDetail.run_id === req.params.rid);
+    if (!run) {
+      res.status(404).send('Cannot find a run with id: ' + req.params.rid);
       return;
     }
-    const filePath = req.params.pid === namedPipelines.noParamsPipeline.id
-      ? './mock-backend/mock-conditional-template.yaml'
-      : './mock-backend/mock-template.yaml';
-    res.send(JSON.stringify({ template: fs.readFileSync(filePath, 'utf-8') }));
+    res.json(run);
   });
 
-  function mockCreatePipeline(res: Response, name: string, body?: any): void {
-    res.header('Content-Type', 'application/json');
-    // Don't allow uploading multiple pipelines with the same name
-    if (fixedData.pipelines.find((p) => p.name === name)) {
-      res.status(502).send(
-        `A Pipeline named: "${name}" already exists. Please choose a different name.`);
-    } else {
-      const pipeline = body || {};
-      pipeline.id = 'new-pipeline-' + (fixedData.pipelines.length + 1);
-      pipeline.name = name;
-      pipeline.created_at = new Date();
-      pipeline.description =
-        'TODO: the mock middleware does not actually use the uploaded pipeline';
-      pipeline.parameters = [
-        {
-          name: 'output'
-        },
-        {
-          name: 'param-1'
-        },
-        {
-          name: 'param-2'
-        },
-      ];
-      fixedData.pipelines.push(pipeline);
-      setTimeout(() => {
-        res.send(fixedData.pipelines[fixedData.pipelines.length - 1]);
-      }, 1000);
+  app.get(v2Prefix + '/runs/:rid/tasks', (req, res) => {
+    res.json({ tasks: req.params.rid === mockNativeRunId ? mockV2Tasks : [] });
+  });
+
+  app.get(v2Prefix + '/artifacts', (_req, res) => {
+    res.json({ artifacts: mockV2Artifacts, total_size: mockV2Artifacts.length });
+  });
+
+  app.get(v2Prefix + '/artifacts/:artifactId', (req, res) => {
+    const artifact = mockV2Artifacts.find(
+      (candidate) => candidate.artifact_id === req.params.artifactId,
+    );
+    if (!artifact) {
+      res.status(404).send(`No artifact was found with ID: ${req.params.artifactId}`);
+      return;
     }
-  }
-
-  app.options(v1beta1Prefix + '/pipelines', (req, res) => {
-    res.send();
-  });
-  app.post(v1beta1Prefix + '/pipelines', (req, res) => {
-    mockCreatePipeline(res, req.body.name);
+    res.json(artifact);
   });
 
-  app.options(v1beta1Prefix + '/pipelines/upload', (req, res) => {
-    res.send();
+  app.get(v2Prefix + '/artifact_tasks', (_req, res) => {
+    res.json({ artifact_tasks: mockV2ArtifactTasks });
   });
-  app.post(v1beta1Prefix + '/pipelines/upload', (req, res) => {
-    mockCreatePipeline(res, decodeURIComponent(req.query.name), req.body);
+
+  app.get(v2Prefix + '/recurringruns', (req, res) => {
+    res.header('Content-Type', 'application/json');
+    let recurringRuns = fixedData.recurringRuns;
+    const experimentId = getQueryString(req.query.experiment_id);
+    if (experimentId) {
+      recurringRuns = recurringRuns.filter(
+        (recurringRun) => recurringRun.experiment_id === experimentId,
+      );
+    }
+    recurringRuns = sortV2Resources(
+      filterV2Resources(recurringRuns, getQueryString(req.query.filter)),
+      JobSortKeys.CREATED_AT,
+      getQueryString(req.query.sort_by),
+    );
+    const page = getPage(recurringRuns, req.query.page_token, req.query.page_size);
+    const response: V2ListRecurringRunsResponse = {
+      next_page_token: page.nextPageToken,
+      recurringRuns: page.page,
+      total_size: recurringRuns.length,
+    };
+
+    res.json(response);
+  });
+
+  app.get(v2Prefix + '/recurringruns/:rid', (req, res) => {
+    res.header('Content-Type', 'application/json');
+    const recurringRun = fixedData.recurringRuns.find(
+      (job) => job.recurring_run_id === req.params.rid,
+    );
+    if (!recurringRun) {
+      res.status(404).send(`No recurring run was found with ID: ${req.params.rid}`);
+      return;
+    }
+    res.json(recurringRun);
+  });
+
+  app.get('/hub/', (_, res) => {
+    res.sendStatus(200);
+  });
+
+  app.get('/artifacts/:artifactId/preview', (req, res) => {
+    const preview =
+      req.params.artifactId === 'mock-artifact-1'
+        ? datasetPreview
+        : req.params.artifactId === 'mock-model-1'
+          ? modelPreview
+          : undefined;
+    if (!preview) {
+      res.status(404).send('No preview is enabled for this artifact.');
+      return;
+    }
+    res.set('Cache-Control', 'no-store').json(preview);
   });
 
   app.get('/artifacts/get', (req, res) => {
-    const key = decodeURIComponent(req.query.key);
+    const key = getRequiredDecodedQueryString(res, req.query.key, 'key');
+    if (!key) {
+      return;
+    }
     res.header('Content-Type', 'application/json');
     if (key.endsWith('roc.csv')) {
-      res.sendFile(_path.resolve(__dirname, rocDataPath));
+      sendMockBackendFile(res, rocDataPath);
     } else if (key.endsWith('roc2.csv')) {
-      res.sendFile(_path.resolve(__dirname, rocDataPath2));
+      sendMockBackendFile(res, rocDataPath2);
     } else if (key.endsWith('confusion_matrix.csv')) {
-      res.sendFile(_path.resolve(__dirname, confusionMatrixPath));
+      sendMockBackendFile(res, confusionMatrixPath);
     } else if (key.endsWith('table.csv')) {
-      res.sendFile(_path.resolve(__dirname, tableDataPath));
+      sendMockBackendFile(res, tableDataPath);
     } else if (key.endsWith('hello-world.html')) {
-      res.sendFile(_path.resolve(__dirname, helloWorldHtmlPath));
+      sendMockBackendFile(res, helloWorldHtmlPath);
     } else if (key.endsWith('hello-world-big.html')) {
-      res.sendFile(_path.resolve(__dirname, helloWorldBigHtmlPath));
+      sendMockBackendFile(res, helloWorldBigHtmlPath);
     } else if (key === 'analysis') {
-      res.sendFile(_path.resolve(__dirname, confusionMatrixMetadataJsonPath));
+      sendMockBackendFile(res, confusionMatrixMetadataJsonPath);
     } else if (key === 'analysis2') {
-      res.sendFile(_path.resolve(__dirname, confusionMatrixMetadataJsonPath));
+      sendMockBackendFile(res, confusionMatrixMetadataJsonPath);
     } else if (key === 'model') {
-      res.sendFile(_path.resolve(__dirname, rocMetadataJsonPath));
+      sendMockBackendFile(res, rocMetadataJsonPath);
     } else if (key === 'model2') {
-      res.sendFile(_path.resolve(__dirname, rocMetadataJsonPath2));
+      sendMockBackendFile(res, rocMetadataJsonPath2);
     } else {
       // TODO: what does production return here?
       res.send('dummy file for key: ' + key);
@@ -604,23 +684,27 @@ export default (app: express.Application) => {
   });
 
   app.get('/apps/tensorboard', (req, res) => {
-    res.send(tensorboardPod);
+    res.send({ proxyPath: tensorboardPod, tfVersion: '', image: '' });
   });
 
-  app.options(v1beta1Prefix + '/apps/tensorboard', (req, res) => {
-    res.send();
-  });
   app.post('/apps/tensorboard', (req, res) => {
-    tensorboardPod = 'http://tensorboardserver:port';
+    tensorboardPod = 'apps/tensorboard/proxy/mock-token/';
     setTimeout(() => {
-      res.send('ok');
+      res.send(tensorboardPod);
     }, 1000);
   });
 
   app.get('/k8s/pod/logs', (req, res) => {
-    const podName = decodeURIComponent(req.query.podname);
+    const podName = getRequiredDecodedQueryString(res, req.query.podname, 'podname');
+    if (!podName) {
+      return;
+    }
+    if (podName === 'json-12abc') {
+      res.status(404).send('pod not found');
+      return;
+    }
     if (podName === 'coinflip-recursive-q7dqb-3721646052') {
-      res.status(404).send('Failed to retrieve log');
+      res.status(500).send('Failed to retrieve log');
       return;
     }
     const shortLog = fs.readFileSync('./mock-backend/shortlog.txt', 'utf-8');
@@ -631,7 +715,21 @@ export default (app: express.Application) => {
     }, 300);
   });
 
-  app.all(v1beta1Prefix + '*', (req, res) => {
+  // Uncomment this instead to test 404 endpoints.
+  // app.get('/system/cluster-name', (_, res) => {
+  //   res.status(404).send('404 Not Found');
+  // });
+  // app.get('/system/project-id', (_, res) => {
+  //   res.status(404).send('404 Not Found');
+  // });
+  app.get('/system/cluster-name', (_, res) => {
+    res.send('mock-cluster-name');
+  });
+  app.get('/system/project-id', (_, res) => {
+    res.send('mock-project-id');
+  });
+
+  app.all(/^\/apis\/v2(?:\/.*)?$/i, (req, res) => {
     res.status(404).send('Bad request endpoint.');
   });
 };

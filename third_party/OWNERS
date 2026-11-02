@@ -1,10 +1,6 @@
 approvers:
-  - vicaire
-  - IronPan
-  - qimingj
-  - yebrahim
+  - chensun
+  - HumairAK
 reviewers:
-  - vicaire
-  - yebrahim
-  - IronPan
-  - qimingj
+  - mprahl
+  - droctothorpe

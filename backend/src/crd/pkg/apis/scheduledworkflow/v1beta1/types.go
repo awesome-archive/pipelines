@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,10 +15,11 @@
 package v1beta1
 
 import (
-	"github.com/argoproj/argo/pkg/apis/workflow/v1alpha1"
+	"github.com/kubeflow/pipelines/backend/src/common"
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/kubernetes/pkg/apis/core"
 )
 
 // +genclient
@@ -56,6 +57,12 @@ type ScheduledWorkflowSpec struct {
 	// +optional
 	MaxConcurrency *int64 `json:"maxConcurrency,omitempty"`
 
+	// If NoCatchup is true, controller only schedules the latest period when
+	// cannot catch up.
+	// NoCatchup defaults to false if not specified.
+	// +optional
+	NoCatchup *bool `json:"noCatchup,omitempty"`
+
 	// Max number of completed workflows to keep track of.
 	// If MaxHistory is not specified, MaxHistory is 10.
 	// MaxHistory cannot be smaller than 0.
@@ -70,6 +77,31 @@ type ScheduledWorkflowSpec struct {
 	// +optional
 	Workflow *WorkflowResource `json:"workflow,omitempty"`
 
+	// ExperimentId
+	ExperimentId string `json:"experimentId,omitempty"`
+
+	// PipelineId
+	PipelineId string `json:"pipelineId,omitempty"`
+
+	// PipelineVersionId
+	PipelineVersionId string `json:"pipelineVersionId,omitempty"`
+
+	// PipelineName is the name of the pipeline identified by PipelineId. It is
+	// informational; the controller schedules runs by ID.
+	PipelineName string `json:"pipelineName,omitempty"`
+
+	// PipelineVersionName is the name of the pipeline version identified by
+	// PipelineVersionId. It is informational; the controller schedules runs by ID.
+	PipelineVersionName string `json:"pipelineVersionName,omitempty"`
+
+	// ServiceAccount
+	ServiceAccount string `json:"serviceAccount,omitempty"`
+
+	// PluginsInput is passed through to CreateRun for each triggered run.
+	// Each key is a plugin name and the value is that plugin's raw config.
+	// +optional
+	PluginsInput map[string]apiextensionsv1.JSON `json:"pluginsInput,omitempty"`
+
 	// TODO: support additional resource types: K8 jobs, etc.
 
 }
@@ -80,13 +112,20 @@ type WorkflowResource struct {
 	// [[ScheduledTime]] is substituted by the scheduled time of the workflow (default format)
 	// [[CurrentTime]] is substituted by the current time (default format)
 	// [[Index]] is substituted by the index of the workflow (e.g. 3 means that it was the 3rd workflow created)
-	// [[ScheduledTime.15-04-05]] is substituted by the sheduled time (custom format specified as a Go time format: https://golang.org/pkg/time/#Parse)
+	// [[ScheduledTime.15-04-05]] is substituted by the scheduled time (custom format specified as a Go time format: https://golang.org/pkg/time/#Parse)
 	// [[CurrentTime.15-04-05]] is substituted by the current time (custom format specified as a Go time format: https://golang.org/pkg/time/#Parse)
 
 	Parameters []Parameter `json:"parameters,omitempty"`
 
+	PipelineRoot string `json:"pipelineRoot,omitempty"`
+
 	// Specification of the workflow to start.
-	Spec v1alpha1.WorkflowSpec `json:"spec,omitempty"`
+	// Use interface{} for backward compatibility
+	// TODO: change it to string and avoid type casting
+	//       after several releases
+	// This is deprecated. In a future release, this will be ignored and this will be compiled by the API server
+	// at runtime.
+	Spec interface{} `json:"spec,omitempty"`
 }
 
 type Parameter struct {
@@ -172,13 +211,7 @@ type ScheduledWorkflowCondition struct {
 	// Type of job condition.
 	Type ScheduledWorkflowConditionType `json:"type,omitempty"`
 	// Status of the condition, one of True, False, Unknown.
-	Status core.ConditionStatus `json:"status,omitempty"`
-	// Last time the condition was checked.
-	// +optional
-	LastProbeTime metav1.Time `json:"lastHeartbeatTime,omitempty"`
-	// Last time the condition transit from one status to another.
-	// +optional
-	LastTransitionTime metav1.Time `json:"lastTransitionTime,omitempty"`
+	Status corev1.ConditionStatus `json:"status,omitempty"`
 	// (brief) reason for the condition's last transition.
 	// +optional
 	Reason string `json:"reason,omitempty"`
@@ -220,7 +253,7 @@ type WorkflowStatus struct {
 	UID types.UID `json:"uid,omitempty"`
 
 	// Phase is a high level summary of the status of the workflow.
-	Phase v1alpha1.NodePhase `json:"phase,omitempty"`
+	Phase common.ExecutionPhase `json:"phase,omitempty"`
 
 	// A human readable message indicating details about why the workflow is in
 	// this condition.

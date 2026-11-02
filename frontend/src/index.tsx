@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,17 +14,34 @@
  * limitations under the License.
  */
 
-import './CSSReset';
-import * as React from 'react';
-import * as ReactDOM from 'react-dom';
-import MuiThemeProvider from '@material-ui/core/styles/MuiThemeProvider';
-import Router from './components/Router';
+import 'src/build/tailwind.output.css';
+import '@xyflow/react/dist/style.css';
+import React, { StrictMode } from 'react';
+import { ThemeProvider, StyledEngineProvider } from '@mui/material/styles';
+import { createRoot } from 'react-dom/client';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { HashRouter } from 'react-router';
 import { cssRule } from 'typestyle';
-import { theme, fonts } from './Css';
-
+import { NavigationErrorBoundary } from './atoms/NavigationErrorBoundary';
+import Router from './components/Router';
+import { fonts, theme } from './Css';
+import { initFeatures } from './features';
+import { Deployments, KFP_FLAGS } from './lib/Flags';
+import { GkeMetadataProvider } from './lib/GkeMetadata';
+import {
+  init as initKfClient,
+  NamespaceContext,
+  NamespaceContextProvider,
+} from './lib/KubeflowClient';
+import { BuildInfoProvider } from './lib/BuildInfo';
 // TODO: license headers
 
+if (KFP_FLAGS.DEPLOYMENT === Deployments.KUBEFLOW) {
+  initKfClient();
+}
+
 cssRule('html, body, #root', {
+  background: 'white',
   color: 'rgba(0, 0, 0, .66)',
   display: 'flex',
   fontFamily: fonts.main,
@@ -33,9 +50,36 @@ cssRule('html, body, #root', {
   width: '100%',
 });
 
-ReactDOM.render(
-  <MuiThemeProvider theme={theme}>
-    <Router />
-  </MuiThemeProvider>,
-  document.getElementById('root')
+initFeatures();
+
+export const queryClient = new QueryClient();
+const app = (
+  <QueryClientProvider client={queryClient}>
+    <StyledEngineProvider injectFirst>
+      <ThemeProvider theme={theme}>
+        <BuildInfoProvider>
+          <GkeMetadataProvider>
+            <HashRouter>
+              <NavigationErrorBoundary>
+                <Router />
+              </NavigationErrorBoundary>
+            </HashRouter>
+          </GkeMetadataProvider>
+        </BuildInfoProvider>
+      </ThemeProvider>
+    </StyledEngineProvider>
+    {/* <ReactQueryDevtools initialIsOpen={false} /> */}
+  </QueryClientProvider>
 );
+const container = document.getElementById('root');
+if (!container) throw new Error('Root element not found');
+const root = createRoot(container);
+const rootElement =
+  KFP_FLAGS.DEPLOYMENT === Deployments.KUBEFLOW ? (
+    <NamespaceContextProvider>{app}</NamespaceContextProvider>
+  ) : (
+    <NamespaceContext.Provider value={import.meta.env.VITE_NAMESPACE || undefined}>
+      {app}
+    </NamespaceContext.Provider>
+  );
+root.render(import.meta.env.DEV ? <StrictMode>{rootElement}</StrictMode> : rootElement);

@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,31 +14,49 @@
  * limitations under the License.
  */
 
-import createMuiTheme from '@material-ui/core/styles/createMuiTheme';
-import { NestedCSSProperties } from 'typestyle/lib/types';
+import { createTheme } from '@mui/material/styles';
 import { style, stylesheet } from 'typestyle';
+import { NestedCSSProperties } from 'typestyle/lib/types';
+
+// Gradually migrate the css styling workflow as below:
+// 1. Navigate to tailwind.config.js file.
+// 2. Extend styling in the way tailwindcss can recognize.
+//    a. For color: Use https://material.io/resources/color.
+// 3. Compile CSS: npm run build:tailwind
 
 export const color = {
   activeBg: '#eaf1fd',
   alert: '#f9ab00', // Google yellow 600
   background: '#fff',
+  blue: '#4285f4', // Google blue 500
   disabledBg: '#ddd',
   divider: '#e0e0e0',
-  errorBg: '#FBE9E7',
-  errorText: '#D50000',
+  errorBg: '#fbe9e7',
+  errorText: '#d50000',
   foreground: '#000',
-  graphBg: '#f5f5f5',
-  hoverBg: '#eee',
-  inactive: '#5F6368',
+  graphBg: '#f2f2f2',
+  grey: '#5f6368', // Google grey 500
+  inactive: '#5f6368',
+  lightGrey: '#eeeeee', // Google grey 200
   lowContrast: '#80868b', // Google grey 600
   secondaryText: 'rgba(0, 0, 0, .88)',
   separator: '#e8e8e8',
-  strong: '#212121',
+  strong: '#202124', // Google grey 900
   success: '#34a853',
+  successWeak: '#e6f4ea', // Google green 50
+  terminated: '#80868b',
   theme: '#1a73e8',
-  themeDarker: '#0b59dc',
+  themeDarker: '#0049b5',
   warningBg: '#f9f9e1',
-  weak: '#999',
+  warningText: '#ee8100',
+  infoBg: '#f3f4ff',
+  infoText: '#1a73e8',
+  tooltipBg: '#1d2744',
+  tooltipShadow: '#aaa',
+  weak: '#9aa0a6',
+  link: '#0d47a1',
+  linkLight: '#5472d3',
+  whiteSmoke: '#f3f3f3',
 };
 
 export const dimension = {
@@ -52,6 +70,25 @@ export const dimension = {
   xsmall: 32,
 };
 
+// tslint:disable:object-literal-sort-keys
+export const zIndex = {
+  DROP_ZONE_OVERLAY: 1,
+  GRAPH_NODE: 1,
+  BUSY_OVERLAY: 2,
+  PIPELINE_SUMMARY_CARD: 2,
+  SIDE_PANEL: 2,
+};
+
+export const fontsize = {
+  small: 12,
+  base: 14,
+  medium: 16,
+  large: 18,
+  title: 18,
+  pageTitle: 24,
+};
+// tslint:enable:object-literal-sort-keys
+
 const baseSpacing = 24;
 export const spacing = {
   base: baseSpacing,
@@ -64,14 +101,6 @@ export const fonts = {
   secondary: '"Roboto", "Helvetica Neue", sans-serif',
 };
 
-export const fontsize = {
-  base: 14,
-  large: 18,
-  medium: 16,
-  small: 12,
-  title: 18,
-};
-
 const palette = {
   primary: {
     dark: color.themeDarker,
@@ -82,92 +111,135 @@ const palette = {
   },
 };
 
-export const theme = createMuiTheme({
-  overrides: {
+export const theme = createTheme({
+  components: {
     MuiButton: {
-      flat: {
-        fontSize: fontsize.base,
-        fontWeight: 'bold',
-        minHeight: dimension.tiny,
-        textTransform: 'none',
-      },
-      flatPrimary: {
-        border: '1px solid #ddd',
-        cursor: 'pointer',
-        fontSize: fontsize.base,
-        marginRight: 10,
-        textTransform: 'none',
-      },
-      flatSecondary: {
-        color: color.theme,
-      },
-      root: {
-        '&$disabled': {
-          backgroundColor: 'initial',
+      styleOverrides: {
+        text: {
+          fontSize: fontsize.base,
+          fontWeight: 'bold',
+          minHeight: dimension.tiny,
+          textTransform: 'none',
         },
-        color: color.theme,
-        marginRight: 10,
-        padding: '0 8px'
+        textPrimary: {
+          border: '1px solid #ddd',
+          cursor: 'pointer',
+          fontSize: fontsize.base,
+          marginRight: 10,
+          textTransform: 'none',
+        },
+        textSecondary: {
+          color: color.theme,
+        },
+        root: {
+          '&.Mui-disabled': {
+            backgroundColor: 'initial',
+          },
+          color: color.theme,
+          marginRight: 10,
+          padding: '0 8px',
+        },
       },
     },
     MuiDialogActions: {
-      root: {
-        margin: 15,
+      styleOverrides: {
+        root: {
+          margin: 15,
+        },
       },
     },
     MuiDialogTitle: {
-      root: {
-        fontSize: fontsize.large,
+      styleOverrides: {
+        root: {
+          fontSize: fontsize.large,
+        },
       },
     },
     MuiFormControlLabel: {
-      root: {
-        marginLeft: 0,
+      styleOverrides: {
+        root: {
+          marginLeft: 0,
+        },
       },
     },
     MuiFormLabel: {
-      filled: {
-        marginLeft: 0,
-        marginTop: 0,
-      },
-      root: {
-        '&$focused': {
+      styleOverrides: {
+        filled: {
           marginLeft: 0,
           marginTop: 0,
         },
-        fontSize: fontsize.base,
-        marginLeft: 5,
-        marginTop: -8,
+        root: {
+          '&.Mui-focused': {
+            marginLeft: 0,
+            marginTop: 0,
+          },
+          fontSize: fontsize.base,
+          marginLeft: 5,
+          marginTop: -8,
+        },
       },
     },
     MuiIconButton: {
-      root: {
-        padding: 9,
+      styleOverrides: {
+        root: {
+          padding: 9,
+        },
       },
     },
     MuiInput: {
-      input: { padding: 0 },
-      root: { padding: 0 }
+      styleOverrides: {
+        input: { padding: 0 },
+        root: { padding: 0 },
+      },
     },
     MuiInputAdornment: {
-      positionEnd: {
-        paddingRight: 0,
+      styleOverrides: {
+        positionEnd: {
+          paddingRight: 0,
+        },
+        root: { padding: 0 },
       },
-      root: { padding: 0 },
+    },
+    MuiTableSortLabel: {
+      styleOverrides: {
+        // Match v3 behavior more closely: keep header text color inherited
+        // from table column styles and avoid washed-out inactive labels.
+        root: {
+          '&.Mui-active': {
+            color: 'inherit',
+          },
+          '&:hover': {
+            color: 'inherit',
+          },
+          color: 'inherit',
+        },
+        icon: {
+          color: `${color.strong} !important`,
+        },
+      },
+    },
+    MuiSvgIcon: {
+      styleOverrides: {
+        // Keep icon sizing consistent with MUI v3 where these were fixed pixel values.
+        root: { fontSize: 24 },
+        fontSizeSmall: { fontSize: 20 },
+        fontSizeLarge: { fontSize: 35 },
+      },
     },
     MuiTooltip: {
-      tooltip: {
-        backgroundColor: '#666',
-        color: '#f1f1f1',
-        fontSize: 12,
-      }
+      styleOverrides: {
+        tooltip: {
+          backgroundColor: '#666',
+          color: '#f1f1f1',
+          fontSize: 12,
+        },
+      },
     },
   },
   palette,
   typography: {
     fontFamily: fonts.main,
-    fontSize: fontsize.base + ' !important' as any,
-    useNextVariants: true,
+    fontSize: fontsize.base,
   },
 });
 
@@ -184,7 +256,7 @@ export const commonCss = stylesheet({
     position: 'absolute',
     right: 0,
     top: 0,
-    zIndex: 1,
+    zIndex: zIndex.BUSY_OVERLAY,
   },
   buttonAction: {
     $nest: {
@@ -223,11 +295,23 @@ export const commonCss = stylesheet({
     paddingBottom: 16,
     paddingTop: 20,
   },
+  header2: {
+    fontSize: fontsize.medium,
+    fontWeight: 'bold',
+    paddingBottom: 16,
+    paddingTop: 20,
+  },
+  infoIcon: {
+    color: color.lowContrast,
+    height: 16,
+    width: 16,
+  },
   link: {
     $nest: {
       '&:hover': {
-        color: color.theme,
+        color: color.linkLight,
         textDecoration: 'underline',
+        cursor: 'pointer',
       },
     },
     color: color.strong,
@@ -254,8 +338,7 @@ export const commonCss = stylesheet({
     whiteSpace: 'pre-wrap',
   },
   scrollContainer: {
-    background:
-      `linear-gradient(white 30%, rgba(255,255,255,0)),
+    background: `linear-gradient(white 30%, rgba(255,255,255,0)),
        linear-gradient(rgba(255,255,255,0), white 70%) 0 100%,
        radial-gradient(farthest-corner at 50% 0, rgba(0,0,0,.2), rgba(0,0,0,0)),
        radial-gradient(farthest-corner at 50% 100%, rgba(0,0,0,.2), rgba(0,0,0,0)) 0 100%`,
@@ -277,7 +360,30 @@ export const commonCss = stylesheet({
     outline: 'none',
     textDecoration: 'none',
   },
+  transitiveReductionSwitch: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+  },
+  codeEditor: {
+    $nest: {
+      '& .CodeMirror': {
+        height: '100%',
+        width: '80%',
+      },
+
+      '& .CodeMirror-gutters': {
+        backgroundColor: '#f7f7f7',
+      },
+    },
+    background: '#f7f7f7',
+    height: '100%',
+  },
 });
+
+export const tailwindcss = {
+  sideNavItem: 'flex flex-row flex-shrink-0',
+};
 
 export function _paddingInternal(units?: number, directions?: string): NestedCSSProperties {
   units = units || baseSpacing;

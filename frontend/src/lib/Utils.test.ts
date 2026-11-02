@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,18 +15,46 @@
  */
 
 import {
-  logger,
+  enabledDisplayStringV2,
+  errorToMessage,
   formatDateString,
-  enabledDisplayString,
-  getRunTime,
+  logger,
+  sanitizeExternalHref,
 } from './Utils';
+import { V2RecurringRunStatus } from 'src/apisv2/recurringrun';
+import { expectErrors } from 'src/TestUtils';
 
 describe('Utils', () => {
+  describe('sanitizeExternalHref', () => {
+    it('returns http and https URLs unchanged', () => {
+      expect(sanitizeExternalHref('http://example.com/x')).toEqual('http://example.com/x');
+      expect(sanitizeExternalHref('https://example.com/x')).toEqual('https://example.com/x');
+      expect(sanitizeExternalHref('HTTPS://example.com/x')).toEqual('HTTPS://example.com/x');
+    });
+
+    it('rejects javascript: and other unsafe schemes', () => {
+      // eslint-disable-next-line no-script-url
+      expect(sanitizeExternalHref('javascript:alert(1)')).toBeUndefined();
+      // eslint-disable-next-line no-script-url
+      expect(sanitizeExternalHref('JAVASCRIPT:alert(1)')).toBeUndefined();
+      expect(sanitizeExternalHref('data:text/html,<script>alert(1)</script>')).toBeUndefined();
+      expect(sanitizeExternalHref('vbscript:msgbox(1)')).toBeUndefined();
+      expect(sanitizeExternalHref('ftp://example.com/x')).toBeUndefined();
+      expect(sanitizeExternalHref('//example.com')).toBeUndefined();
+      expect(sanitizeExternalHref('not a URL')).toBeUndefined();
+    });
+
+    it('returns undefined for empty or missing input', () => {
+      expect(sanitizeExternalHref('')).toBeUndefined();
+      expect(sanitizeExternalHref(undefined)).toBeUndefined();
+    });
+  });
+
   describe('log', () => {
     it('logs to console', () => {
       // tslint:disable-next-line:no-console
       const backup = console.log;
-      global.console.log = jest.fn();
+      global.console.log = vi.fn();
       logger.verbose('something to console');
       // tslint:disable-next-line:no-console
       expect(console.log).toBeCalledWith('something to console');
@@ -36,7 +64,7 @@ describe('Utils', () => {
     it('logs to console error', () => {
       // tslint:disable-next-line:no-console
       const backup = console.error;
-      global.console.error = jest.fn();
+      global.console.error = vi.fn();
       logger.error('something to console error');
       // tslint:disable-next-line:no-console
       expect(console.error).toBeCalledWith('something to console error');
@@ -65,111 +93,41 @@ describe('Utils', () => {
     });
   });
 
-  describe('enabledDisplayString', () => {
-    it('handles undefined', () => {
-      expect(enabledDisplayString(undefined, true)).toBe('-');
-      expect(enabledDisplayString(undefined, false)).toBe('-');
+  describe('errorToMessage', () => {
+    it('handles an Error instance', async () => {
+      expect(await errorToMessage(new Error('test error'))).toBe('test error');
     });
 
-    it('handles a trigger according to the enabled flag', () => {
-      expect(enabledDisplayString({}, true)).toBe('Yes');
-      expect(enabledDisplayString({}, false)).toBe('No');
-    });
-  });
-
-  describe('getRunTime', () => {
-    it('handles no workflow', () => {
-      expect(getRunTime()).toBe('-');
+    it('handles object with text() method that returns a string', async () => {
+      const mockResponse = {
+        text: () => 'direct string response',
+      };
+      const result = await errorToMessage(mockResponse);
+      expect(result).toBe('direct string response');
     });
 
-    it('handles no status', () => {
-      const workflow = {} as any;
-      expect(getRunTime(workflow)).toBe('-');
+    it('handles plain object input', async () => {
+      const errorObj = { message: 'error message', code: 500 };
+      const result = await errorToMessage(errorObj);
+      expect(result).toBe(JSON.stringify(errorObj));
     });
 
-    it('handles no phase', () => {
-      const workflow = {
-        status: {
-          finishedAt: 'some end',
-          startedAt: 'some start',
-        }
-      } as any;
-      expect(getRunTime(workflow)).toBe('-');
+    it('handles string input', async () => {
+      expect(await errorToMessage('string error')).toBe('"string error"');
     });
 
-    it('handles no start date', () => {
-      const workflow = {
-        status: {
-          finishedAt: 'some end',
-          phase: 'Succeeded',
-        }
-      } as any;
-      expect(getRunTime(workflow)).toBe('-');
+    it('handles undefined input', async () => {
+      expect(await errorToMessage(undefined)).toBe('');
     });
 
-    it('handles no end date', () => {
-      const workflow = {
-        status: {
-          phase: 'Succeeded',
-          startedAt: 'some end',
-        }
-      } as any;
-      expect(getRunTime(workflow)).toBe('-');
+    it('handles array input', async () => {
+      expect(await errorToMessage([1, 'error', { key: 'value' }])).toBe(
+        '[1,"error",{"key":"value"}]',
+      );
     });
 
-    it('computes seconds run time if status is provided', () => {
-      const workflow = {
-        status: {
-          finishedAt: new Date(2018, 1, 3, 3, 56, 25).toISOString(),
-          phase: 'Succeeded',
-          startedAt: new Date(2018, 1, 2, 3, 55, 30).toISOString(),
-        }
-      } as any;
-      expect(getRunTime(workflow)).toBe('0:00:55');
-    });
-
-    it('computes minutes/seconds run time if status is provided', () => {
-      const workflow = {
-        status: {
-          finishedAt: new Date(2018, 1, 3, 3, 59, 25).toISOString(),
-          phase: 'Succeeded',
-          startedAt: new Date(2018, 1, 2, 3, 55, 10).toISOString(),
-        }
-      } as any;
-      expect(getRunTime(workflow)).toBe('0:04:15');
-    });
-
-    it('computes days/minutes/seconds run time if status is provided', () => {
-      const workflow = {
-        status: {
-          finishedAt: new Date(2018, 1, 3, 4, 55, 10).toISOString(),
-          phase: 'Succeeded',
-          startedAt: new Date(2018, 1, 2, 3, 55, 10).toISOString(),
-        }
-      } as any;
-      expect(getRunTime(workflow)).toBe('1:00:00');
-    });
-
-    it('computes padded days/minutes/seconds run time if status is provided', () => {
-      const workflow = {
-        status: {
-          finishedAt: new Date(2018, 1, 3, 4, 56, 11).toISOString(),
-          phase: 'Succeeded',
-          startedAt: new Date(2018, 1, 2, 3, 55, 10).toISOString(),
-        }
-      } as any;
-      expect(getRunTime(workflow)).toBe('1:01:01');
-    });
-
-    it('shows negative sign if start date is after end date', () => {
-      const workflow = {
-        status: {
-          finishedAt: new Date(2018, 1, 2, 3, 55, 11).toISOString(),
-          phase: 'Succeeded',
-          startedAt: new Date(2018, 1, 2, 3, 55, 13).toISOString(),
-        }
-      } as any;
-      expect(getRunTime(workflow)).toBe('-0:00:02');
+    it('handles number input', async () => {
+      expect(await errorToMessage(404)).toBe('404');
     });
   });
 });

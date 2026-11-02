@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,36 +15,29 @@
 package client
 
 import (
-	api "github.com/kubeflow/pipelines/backend/api/go_client"
 	"github.com/kubeflow/pipelines/backend/src/common/util"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 )
 
 type PipelineClientFake struct {
-	workflows                 map[string]*util.Workflow
-	scheduledWorkflows        map[string]*util.ScheduledWorkflow
-	err                       error
-	artifacts                 map[string]*api.ReadArtifactResponse
-	reportedMetricsRequest    *api.ReportRunMetricsRequest
-	reportMetricsResponseStub *api.ReportRunMetricsResponse
-	reportMetricsErrorStub    error
+	workflows          map[string]util.ExecutionSpec
+	scheduledWorkflows map[string]*util.ScheduledWorkflow
+	err                error
 }
 
 func NewPipelineClientFake() *PipelineClientFake {
 	return &PipelineClientFake{
-		workflows:                 make(map[string]*util.Workflow),
-		scheduledWorkflows:        make(map[string]*util.ScheduledWorkflow),
-		err:                       nil,
-		artifacts:                 make(map[string]*api.ReadArtifactResponse),
-		reportMetricsResponseStub: &api.ReportRunMetricsResponse{},
+		workflows:          make(map[string]util.ExecutionSpec),
+		scheduledWorkflows: make(map[string]*util.ScheduledWorkflow),
+		err:                nil,
 	}
 }
 
-func (p *PipelineClientFake) ReportWorkflow(workflow *util.Workflow) error {
+func (p *PipelineClientFake) ReportWorkflow(workflow util.ExecutionSpec) error {
 	if p.err != nil {
 		return p.err
 	}
-	p.workflows[getKey(workflow.Namespace, workflow.Name)] = workflow
+	p.workflows[getKey(workflow.ExecutionNamespace(), workflow.ExecutionName())] = workflow
 	return nil
 }
 
@@ -56,36 +49,14 @@ func (p *PipelineClientFake) ReportScheduledWorkflow(swf *util.ScheduledWorkflow
 	return nil
 }
 
-func (p *PipelineClientFake) ReadArtifact(request *api.ReadArtifactRequest) (*api.ReadArtifactResponse, error) {
-	return p.artifacts[request.String()], nil
-}
-
-func (p *PipelineClientFake) ReportRunMetrics(request *api.ReportRunMetricsRequest) (*api.ReportRunMetricsResponse, error) {
-	p.reportedMetricsRequest = request
-	return p.reportMetricsResponseStub, p.reportMetricsErrorStub
-}
-
 func (p *PipelineClientFake) SetError(err error) {
 	p.err = err
 }
 
-func (p *PipelineClientFake) GetWorkflow(namespace string, name string) *util.Workflow {
+func (p *PipelineClientFake) GetWorkflow(namespace string, name string) util.ExecutionSpec {
 	return p.workflows[getKey(namespace, name)]
 }
 
 func (p *PipelineClientFake) GetScheduledWorkflow(namespace string, name string) *util.ScheduledWorkflow {
 	return p.scheduledWorkflows[getKey(namespace, name)]
-}
-
-func (p *PipelineClientFake) StubArtifact(request *api.ReadArtifactRequest, response *api.ReadArtifactResponse) {
-	p.artifacts[request.String()] = response
-}
-
-func (p *PipelineClientFake) StubReportRunMetrics(response *api.ReportRunMetricsResponse, err error) {
-	p.reportMetricsResponseStub = response
-	p.err = err
-}
-
-func (p *PipelineClientFake) GetReportedMetricsRequest() *api.ReportRunMetricsRequest {
-	return p.reportedMetricsRequest
 }

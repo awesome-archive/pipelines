@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,51 +14,68 @@
  * limitations under the License.
  */
 
-import * as React from 'react';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { vi } from 'vitest';
 import CollapseButton from './CollapseButton';
-import { shallow } from 'enzyme';
 
 describe('CollapseButton', () => {
   const compareComponent = {
-    setState: jest.fn(),
+    collapseSectionsUpdate: vi.fn(),
     state: {
       collapseSections: {},
     },
   } as any;
 
-  afterEach(() => compareComponent.state.collapseSections = {});
+  afterEach(() => {
+    compareComponent.state.collapseSections = {};
+    compareComponent.collapseSectionsUpdate.mockClear();
+  });
 
   it('initial render', () => {
-    const tree = shallow(
-      <CollapseButton collapseSections={compareComponent.state.collapseSections}
-        compareSetState={compareComponent.setState} sectionName='testSection' />);
-    expect(tree).toMatchSnapshot();
+    const { asFragment } = render(
+      <CollapseButton
+        collapseSections={compareComponent.state.collapseSections}
+        collapseSectionsUpdate={compareComponent.collapseSectionsUpdate}
+        sectionName='testSection'
+      />,
+    );
+    expect(asFragment()).toMatchSnapshot();
   });
 
   it('renders the button collapsed if in collapsedSections', () => {
     compareComponent.state.collapseSections.testSection = true;
-    const tree = shallow(
-      <CollapseButton collapseSections={compareComponent.state.collapseSections}
-        compareSetState={compareComponent.setState} sectionName='testSection' />);
-    expect(tree).toMatchSnapshot();
+    const { asFragment } = render(
+      <CollapseButton
+        collapseSections={compareComponent.state.collapseSections}
+        collapseSectionsUpdate={compareComponent.collapseSectionsUpdate}
+        sectionName='testSection'
+      />,
+    );
+    expect(asFragment()).toMatchSnapshot();
   });
 
   it('collapses given section when clicked', () => {
-    const tree = shallow(
-      <CollapseButton collapseSections={compareComponent.state.collapseSections}
-        compareSetState={compareComponent.setState} sectionName='testSection' />);
-    tree.find('WithStyles(Button)').simulate('click');
-    expect(compareComponent.setState).toHaveBeenCalledWith(
-      { collapseSections: { testSection: true } });
+    render(
+      <CollapseButton
+        collapseSections={compareComponent.state.collapseSections}
+        collapseSectionsUpdate={compareComponent.collapseSectionsUpdate}
+        sectionName='testSection'
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'testSection' }));
+    expect(compareComponent.collapseSectionsUpdate).toHaveBeenCalledWith({ testSection: true });
   });
 
   it('expands given section when clicked if it is collapsed', () => {
     compareComponent.state.collapseSections.testSection = true;
-    const tree = shallow(
-      <CollapseButton collapseSections={compareComponent.state.collapseSections}
-        compareSetState={compareComponent.setState} sectionName='testSection' />);
-    tree.find('WithStyles(Button)').simulate('click');
-    expect(compareComponent.setState).toHaveBeenCalledWith(
-      { collapseSections: { testSection: false } });
+    render(
+      <CollapseButton
+        collapseSections={compareComponent.state.collapseSections}
+        collapseSectionsUpdate={compareComponent.collapseSectionsUpdate}
+        sectionName='testSection'
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'testSection' }));
+    expect(compareComponent.collapseSectionsUpdate).toHaveBeenCalledWith({ testSection: false });
   });
 });

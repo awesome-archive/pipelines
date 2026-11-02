@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,11 +22,11 @@ import (
 	"strconv"
 	"time"
 
-	workflowapi "github.com/argoproj/argo/pkg/apis/workflow/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+
 	commonutil "github.com/kubeflow/pipelines/backend/src/common/util"
 	swfapi "github.com/kubeflow/pipelines/backend/src/crd/pkg/apis/scheduledworkflow/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kubernetes/pkg/apis/core"
 )
 
 const (
@@ -41,12 +41,13 @@ const (
 // ScheduledWorkflow is a type to help manipulate ScheduledWorkflow objects.
 type ScheduledWorkflow struct {
 	*swfapi.ScheduledWorkflow
+	uuid commonutil.UUIDGeneratorInterface
 }
 
 // NewScheduledWorkflow creates an instance of ScheduledWorkflow.
 func NewScheduledWorkflow(swf *swfapi.ScheduledWorkflow) *ScheduledWorkflow {
 	return &ScheduledWorkflow{
-		swf,
+		swf, commonutil.NewUUIDGenerator(),
 	}
 }
 
@@ -107,7 +108,8 @@ func (s *ScheduledWorkflow) lastIndex() int64 {
 	}
 }
 
-func (s *ScheduledWorkflow) nextIndex() int64 {
+// NextIndex returns the one-based index of the next run of this schedule.
+func (s *ScheduledWorkflow) NextIndex() int64 {
 	return s.lastIndex() + 1
 }
 
@@ -127,7 +129,7 @@ func (s *ScheduledWorkflow) isOneOffRun() bool {
 }
 
 func (s *ScheduledWorkflow) nextResourceID() string {
-	return s.Name + "-" + strconv.FormatInt(s.nextIndex(), 10)
+	return s.Name + "-" + strconv.FormatInt(s.NextIndex(), 10)
 }
 
 // NextResourceName creates a deterministic resource name for the next resource.
@@ -147,61 +149,55 @@ func (s *ScheduledWorkflow) getWorkflowParametersAsMap() map[string]string {
 	return resultAsMap
 }
 
-func (s *ScheduledWorkflow) getFormattedWorkflowParametersAsMap(
-	formatter *ParameterFormatter) map[string]string {
-
-	result := make(map[string]string)
-	for key, value := range s.getWorkflowParametersAsMap() {
-		formatted := formatter.Format(value)
-		result[key] = formatted
-	}
-	return result
-}
-
 // NewWorkflow creates a workflow for this schedule. It also sets
 // the appropriate OwnerReferences on the resource so handleObject can discover
 // the Schedule resource that 'owns' it.
 func (s *ScheduledWorkflow) NewWorkflow(
-	nextScheduledEpoch int64, nowEpoch int64) *commonutil.Workflow {
-
-	const (
-		workflowKind       = "Workflow"
-		workflowApiVersion = "argoproj.io/v1alpha1"
-	)
+	nextScheduledEpoch int64, nowEpoch int64) (commonutil.ExecutionSpec, error) {
 
 	// Creating the workflow.
-	workflow := &workflowapi.Workflow{
-		Spec: *s.Spec.Workflow.Spec.DeepCopy(),
+	execSpec, err := commonutil.ScheduleSpecToExecutionSpec(commonutil.CurrentExecutionType(), s.Spec.Workflow)
+	if err != nil {
+		return nil, err
 	}
-	workflow.Kind = workflowKind
-	workflow.APIVersion = workflowApiVersion
-	result := commonutil.NewWorkflow(workflow)
 
-	// Set the name of the worfklow.
-	result.OverrideName(s.NextResourceName())
+	uuid, err := s.uuid.NewRandom()
+	if err != nil {
+		return nil, err
+	}
+
+	// Set the name of the workflow.
+	execSpec.SetExecutionName(s.NextResourceName())
 
 	// Get the workflow parameters and format them.
-	formatter := NewParameterFormatter(nextScheduledEpoch, nowEpoch, s.nextIndex())
-	formattedParams := s.getFormattedWorkflowParametersAsMap(formatter)
+	formatter := commonutil.NewSWFParameterFormatter(uuid.String(), nextScheduledEpoch, nowEpoch, s.NextIndex())
+	formattedParams := formatter.FormatWorkflowParameters(s.getWorkflowParametersAsMap())
 
 	// Set the parameters.
-	result.OverrideParameters(formattedParams)
+	execSpec.OverrideParameters(formattedParams)
 
-	result.SetCannonicalLabels(s.Name, nextScheduledEpoch, s.nextIndex())
-
+	execSpec.SetCannonicalLabels(s.Name, nextScheduledEpoch, s.NextIndex())
+	execSpec.SetLabels(commonutil.LabelKeyWorkflowRunId, uuid.String())
+	// The run label associates executor pods with their run.
+	execSpec.SetPodMetadataLabels(commonutil.LabelKeyWorkflowRunId, uuid.String())
+	// Replace {{workflow.uid}} with runId
+	err = execSpec.ReplaceUID(uuid.String())
+	if err != nil {
+		return nil, err
+	}
 	// The the owner references.
-	result.SetOwnerReferences(s.ScheduledWorkflow)
+	execSpec.SetOwnerReferences(s.ScheduledWorkflow)
 
-	return result
+	return execSpec, nil
 }
 
 // GetNextScheduledEpoch returns the next epoch at which a workflow should be scheduled,
 // and whether it should be run now.
-func (s *ScheduledWorkflow) GetNextScheduledEpoch(activeWorkflowCount int64, nowEpoch int64) (
+func (s *ScheduledWorkflow) GetNextScheduledEpoch(activeWorkflowCount int64, nowEpoch int64, location time.Location) (
 	nextScheduleEpoch int64, shouldRunNow bool) {
 
 	// Get the next scheduled time.
-	nextScheduledEpoch := s.getNextScheduledEpoch()
+	nextScheduledEpoch := s.getNextScheduledEpoch(nowEpoch, location)
 
 	// If the schedule is not enabled, we should not schedule the workflow now.
 	if s.enabled() == false {
@@ -221,21 +217,37 @@ func (s *ScheduledWorkflow) GetNextScheduledEpoch(activeWorkflowCount int64, now
 	return nextScheduledEpoch, true
 }
 
-func (s *ScheduledWorkflow) getNextScheduledEpoch() int64 {
+func (s *ScheduledWorkflow) getNextScheduledEpoch(nowEpoch int64, location time.Location) int64 {
+	catchup := true
+	if s.Spec.NoCatchup != nil {
+		catchup = !*s.Spec.NoCatchup
+	}
 	// Periodic schedule
 	if s.Spec.Trigger.PeriodicSchedule != nil {
-		return NewPeriodicSchedule(s.Spec.Trigger.PeriodicSchedule).
-			GetNextScheduledEpoch(
+		schedule := NewPeriodicSchedule(s.Spec.Trigger.PeriodicSchedule)
+		if catchup {
+			return schedule.GetNextScheduledEpoch(
 				commonutil.ToInt64Pointer(s.Status.Trigger.LastTriggeredTime),
 				s.creationEpoch())
+		}
+		return schedule.GetNextScheduledEpochNoCatchup(
+			commonutil.ToInt64Pointer(s.Status.Trigger.LastTriggeredTime),
+			s.creationEpoch(), nowEpoch)
+
 	}
 
 	// Cron schedule
 	if s.Spec.Trigger.CronSchedule != nil {
-		return NewCronSchedule(s.Spec.Trigger.CronSchedule).
-			GetNextScheduledEpoch(
-				commonutil.ToInt64Pointer(s.Status.Trigger.LastTriggeredTime),
-				s.creationEpoch())
+		nowTime := time.Unix(nowEpoch, 0)
+		schedule := NewCronSchedule(s.Spec.Trigger.CronSchedule)
+		if catchup {
+			return schedule.GetNextScheduledTime(
+				s.Status.Trigger.LastTriggeredTime,
+				time.Unix(s.creationEpoch(), 0).In(&location), &location).Unix()
+		}
+		return schedule.GetNextScheduledTimeNoCatchup(
+			s.Status.Trigger.LastTriggeredTime,
+			time.Unix(s.creationEpoch(), 0).In(&location), nowTime, &location).Unix()
 	}
 
 	return s.getNextScheduledEpochForOneTimeRun()
@@ -256,22 +268,18 @@ func (s *ScheduledWorkflow) setLabel(key string, value string) {
 	s.Labels[key] = value
 }
 
-// UpdateStatus updates the status of a workflow in the Kubernetes API server.
-func (s *ScheduledWorkflow) UpdateStatus(updatedEpoch int64, workflow *commonutil.Workflow,
+// UpdateStatus updates the ScheduledWorkflow object's status fields (in-memory).
+func (s *ScheduledWorkflow) UpdateStatus(submitted bool,
 	scheduledEpoch int64, active []swfapi.WorkflowStatus,
-	completed []swfapi.WorkflowStatus) {
-
-	updatedTime := metav1.NewTime(time.Unix(updatedEpoch, 0).UTC())
+	completed []swfapi.WorkflowStatus, location *time.Location) {
 
 	conditionType, status, message := s.getStatusAndMessage(len(active))
 
 	condition := swfapi.ScheduledWorkflowCondition{
-		Type:               conditionType,
-		Status:             status,
-		LastProbeTime:      updatedTime,
-		LastTransitionTime: updatedTime,
-		Reason:             string(conditionType),
-		Message:            message,
+		Type:    conditionType,
+		Status:  status,
+		Reason:  string(conditionType),
+		Message: message,
 	}
 
 	conditions := make([]swfapi.ScheduledWorkflowCondition, 0)
@@ -297,10 +305,11 @@ func (s *ScheduledWorkflow) UpdateStatus(updatedEpoch int64, workflow *commonuti
 		s.enabled()))
 	s.setLabel(commonutil.LabelKeyScheduledWorkflowStatus, string(conditionType))
 
-	if workflow != nil {
+	if submitted {
 		s.updateLastTriggeredTime(scheduledEpoch)
-		s.Status.Trigger.LastIndex = commonutil.Int64Pointer(s.nextIndex())
-		s.updateNextTriggeredTime(s.getNextScheduledEpoch())
+		s.Status.Trigger.LastIndex = commonutil.Int64Pointer(s.NextIndex())
+		nextTriggerTime := s.getNextScheduledEpoch(0, *location)
+		s.updateNextTriggeredTime(nextTriggerTime)
 	} else {
 		// LastTriggeredTime is unchanged.
 		s.updateNextTriggeredTime(scheduledEpoch)
@@ -314,7 +323,7 @@ func (s *ScheduledWorkflow) updateLastTriggeredTime(epoch int64) {
 }
 
 func (s *ScheduledWorkflow) updateNextTriggeredTime(epoch int64) {
-	if epoch != math.MaxInt64 {
+	if epoch < maxTime.Unix() {
 		s.Status.Trigger.NextTriggeredTime = commonutil.Metav1TimePointer(
 			metav1.NewTime(time.Unix(epoch, 0).UTC()))
 	} else {
@@ -324,7 +333,7 @@ func (s *ScheduledWorkflow) updateNextTriggeredTime(epoch int64) {
 
 func (s *ScheduledWorkflow) getStatusAndMessage(activeCount int) (
 	conditionType swfapi.ScheduledWorkflowConditionType,
-	status core.ConditionStatus, message string) {
+	status corev1.ConditionStatus, message string) {
 	// Schedule messages
 	const (
 		ScheduleEnabledMessage   = "The schedule is enabled."
@@ -335,15 +344,15 @@ func (s *ScheduledWorkflow) getStatusAndMessage(activeCount int) (
 
 	if s.isOneOffRun() {
 		if s.hasRunAtLeastOnce() && activeCount == 0 {
-			return swfapi.ScheduledWorkflowSucceeded, core.ConditionTrue, ScheduleSucceededMessage
+			return swfapi.ScheduledWorkflowSucceeded, corev1.ConditionTrue, ScheduleSucceededMessage
 		} else {
-			return swfapi.ScheduledWorkflowRunning, core.ConditionTrue, ScheduleRunningMessage
+			return swfapi.ScheduledWorkflowRunning, corev1.ConditionTrue, ScheduleRunningMessage
 		}
 	} else {
 		if s.enabled() {
-			return swfapi.ScheduledWorkflowEnabled, core.ConditionTrue, ScheduleEnabledMessage
+			return swfapi.ScheduledWorkflowEnabled, corev1.ConditionTrue, ScheduleEnabledMessage
 		} else {
-			return swfapi.ScheduledWorkflowDisabled, core.ConditionTrue, ScheduleDisabledMessage
+			return swfapi.ScheduledWorkflowDisabled, corev1.ConditionTrue, ScheduleDisabledMessage
 		}
 	}
 }

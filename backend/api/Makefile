@@ -1,10 +1,10 @@
-# Copyright 2018 Google LLC
+# Copyright 2021 The Kubeflow Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#      https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,119 +12,128 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Makefile to generate KFP api clients from proto.
 
-# Building requires protobuf version 3.6.0 or above. Unzip this directory to a
-# suitable location and modify the values of the following two variables before
-# running make.
-protocompiler = ${HOME}/protobuf-3.6.1/bin/protoc
-protoinclude = ${HOME}/protobuf-3.6.1/include
+IMAGE_TAG=kfp-api-generator
+# Remote image for publishing (used by CI)
+REMOTE_IMAGE=ghcr.io/kubeflow/kfp-api-generator
+# Assume the latest API version by default.
+API_VERSION ?= v2
+ifneq ($(API_VERSION),v2)
+$(error Generate the canonical v2 API; v2beta1 is a frozen compatibility contract)
+endif
 
-TMPDIR := $(shell mktemp -d)
+# Pre-built images for faster development (default: enabled for speed)
+# Set USE_PREBUILT_IMAGE=false when:
+# - Dockerfile dependencies have been updated
+# - CI validation fails due to tool version mismatches
+# - Working on API generation toolchain changes
+USE_PREBUILT_IMAGE ?= true
+# Validate USE_PREBUILT_IMAGE value
+ifneq ($(USE_PREBUILT_IMAGE),true)
+ifneq ($(USE_PREBUILT_IMAGE),false)
+$(error USE_PREBUILT_IMAGE must be 'true' or 'false', got '$(USE_PREBUILT_IMAGE)')
+endif
+endif
+PREBUILT_REMOTE_IMAGE=ghcr.io/kubeflow/kfp-api-generator:master
+RELEASE_IMAGE=ghcr.io/kubeflow/kfp-release:master
+CONTAINER_ENGINE ?= docker
 
-default: all
+# Generate clients using either pre-built image (fast) or source build (current tools).
+# Use USE_PREBUILT_IMAGE=false when pre-built image may have outdated dependencies.
+.PHONY: generate
+generate: fetch-dependencies hack/generator.sh $(API_VERSION)/*.proto
+ifeq ($(USE_PREBUILT_IMAGE),true)
+	${CONTAINER_ENGINE} run --interactive --rm \
+		-e API_VERSION=$(API_VERSION) \
+		--user $$(id -u):$$(id -g) \
+		--mount type=bind,source="$$(pwd)/../..",target=/go/src/github.com/kubeflow/pipelines \
+		$(PREBUILT_REMOTE_IMAGE) /go/src/github.com/kubeflow/pipelines/backend/api/hack/generator.sh
+else
+	$(MAKE) generate-from-source
+endif
 
-dependencies:
-	@echo "Using temporary directory: $(TMPDIR)"
-	GOBIN=$(TMPDIR) go install ../../vendor/github.com/go-swagger/go-swagger/cmd/swagger
-	GOBIN=$(TMPDIR) go install ../../vendor/github.com/grpc-ecosystem/grpc-gateway/protoc-gen-grpc-gateway
-	GOBIN=$(TMPDIR) go install ../../vendor/github.com/grpc-ecosystem/grpc-gateway/protoc-gen-swagger
-	GOBIN=$(TMPDIR) go install ../../vendor/github.com/golang/protobuf/protoc-gen-go
+# Generate clients by building api-generator image from source.
+# This ensures generated files always use current tool versions.
+.PHONY: generate-from-source
+generate-from-source: fetch-dependencies .image-built hack/generator.sh $(API_VERSION)/*.proto
+	${CONTAINER_ENGINE} run --interactive --rm \
+		-e API_VERSION=$(API_VERSION) \
+		--user $$(id -u):$$(id -g) \
+		--mount type=bind,source="$$(pwd)/../..",target=/go/src/github.com/kubeflow/pipelines \
+		$(IMAGE_TAG) /go/src/github.com/kubeflow/pipelines/backend/api/hack/generator.sh
 
-all: dependencies
+# Regenerate Go compatibility shims without invoking protoc or Docker.
+.PHONY: generate-compat
+generate-compat:
+	cd ../.. && go run ./backend/api/hack/generate_compat
 
-	# Delete currently generated code.
-	rm -r -f go_http_client/*
-	rm -r -f go_client/*
+# Generate KFP server API package using either pre-built image (fast) or source build (current tools).
+# Use USE_PREBUILT_IMAGE=false when pre-built image may have outdated dependencies.
+.PHONY: generate-kfp-server-api-package
+generate-kfp-server-api-package:
+ifeq ($(USE_PREBUILT_IMAGE),true)
+	${CONTAINER_ENGINE} run --interactive --rm \
+		-e API_VERSION=$(API_VERSION) \
+		--user $$(id -u):$$(id -g) \
+		--mount type=bind,source="$$(pwd)/../..",target=/go/src/github.com/kubeflow/pipelines \
+		$(RELEASE_IMAGE) /go/src/github.com/kubeflow/pipelines/backend/api/build_kfp_server_api_python_package.sh
+else
+	$(MAKE) generate-kfp-server-api-package-from-source
+endif
 
-	# Compile the *.proto files into *.pb.go (grpc client).
-	$(protocompiler) -I$(protoinclude) -I/usr/local/include -I. \
-		-I../../vendor/github.com/grpc-ecosystem/grpc-gateway/third_party/googleapis \
-		-I../../vendor/github.com/grpc-ecosystem/grpc-gateway/ \
-		--plugin=protoc-gen-go=${TMPDIR}/protoc-gen-go \
-		--go_out=plugins=grpc:go_client \
-		*.proto
+# Generate KFP server API package by building api-generator image from source.
+# The API generator image now includes Java for OpenAPI generator.
+.PHONY: generate-kfp-server-api-package-from-source
+generate-kfp-server-api-package-from-source: .image-built
+	${CONTAINER_ENGINE} run --interactive --rm \
+		-e API_VERSION=$(API_VERSION) \
+		--user $$(id -u):$$(id -g) \
+		--mount type=bind,source="$$(pwd)/../..",target=/go/src/github.com/kubeflow/pipelines \
+		$(IMAGE_TAG) /go/src/github.com/kubeflow/pipelines/backend/api/build_kfp_server_api_python_package.sh
 
-	# Compile the *.proto files into *.pb.gw.go (grpc client).
-	$(protocompiler) -I$(protoinclude) -I/usr/local/include -I. \
-		-I../../vendor/github.com/grpc-ecosystem/grpc-gateway/third_party/googleapis \
-		-I../../vendor/github.com/grpc-ecosystem/grpc-gateway/ \
-		--plugin=protoc-gen-grpc-gateway=${TMPDIR}/protoc-gen-grpc-gateway \
-		--grpc-gateway_out=logtostderr=true:go_client \
-		*.proto
 
-	# Filter.proto is implicitly used by clients and server, and transmitted as a
-	# serialized string in ListXXX requests. This hack defines a dummy service to
-	# coerce protoc-gen-swagger to generate Swagger JSON definitions for
-	# filter.proto.
-	cp -f filter.proto filter.proto.bak
-	printf "service DummyFilterService {\nrpc DoFilter(Filter) returns (Filter) {\n option (google.api.http) = { \nget: \"/apis/v1beta1/filters\"\n};\n }}" >> filter.proto
+# Fetch dependency proto
+.PHONY: fetch-dependencies
+fetch-dependencies: $(API_VERSION)/google/rpc/status.proto
 
-  # Compile the *.proto files into *.swagger.json (swagger specification).
-	$(protocompiler) -I$(protoinclude) -I/usr/local/include -I. \
-		-I../../vendor/github.com/grpc-ecosystem/grpc-gateway/third_party/googleapis \
-		-I../../vendor/github.com/grpc-ecosystem/grpc-gateway/ \
-		--plugin=protoc-gen-swagger=${TMPDIR}/protoc-gen-swagger \
-		--swagger_out=logtostderr=true:swagger \
-		*.proto
+$(API_VERSION)/google/rpc/status.proto:
+	@mkdir -p $(API_VERSION)/google/rpc
+	@# Authenticate with GITHUB_TOKEN when set to avoid anonymous per-IP 429
+	@# rate limits on raw.githubusercontent.com. The bearer header is passed
+	@# through a temporary WGETRC file, never on the command line. If the
+	@# authenticated fetch fails it falls back to an anonymous fetch, so
+	@# behavior is never worse than without a token.
+	@wget_cmd="wget --tries=3 --waitretry=10 --retry-on-http-error=429,500,502,503 -O $(API_VERSION)/google/rpc/status.proto https://raw.githubusercontent.com/googleapis/googleapis/047d3a8ac7f75383855df0166144f891d7af08d9/google/rpc/status.proto"; \
+	if [ -n "$$GITHUB_TOKEN" ]; then \
+		wgetrc=$$(mktemp "$${TMPDIR:-/tmp}/kfp-proto-wgetrc.XXXXXX"); \
+		printf 'header = Authorization: Bearer %s\n' "$$GITHUB_TOKEN" > "$$wgetrc"; \
+		WGETRC=$$wgetrc $$wget_cmd || $$wget_cmd; \
+		status=$$?; \
+		rm -f "$$wgetrc"; \
+	else \
+		$$wget_cmd; \
+		status=$$?; \
+	fi; \
+	exit $$status
 
-	# Revert the dummy service definition.
-	mv -f filter.proto.bak filter.proto
+# Legacy target - always builds from source for backward compatibility.
+.PHONY: generate-from-scratch
+generate-from-scratch: generate-from-source
 
-	# Compile the *.swagger.json into go REST clients.
-	# Instructions to install the 'swagger' command are located here:
-	# https://github.com/go-swagger/go-swagger
-	# swagger v0.17.0 was last used.
+# Build a local api-generator image.
+.PHONY: image
+image: .image-built
 
-	$(TMPDIR)/swagger generate client \
-		-f swagger/job.swagger.json \
-		-A job \
-		--principal models.Principal \
-		-c job_client \
-		-m job_model \
-		-t go_http_client
-	$(TMPDIR)/swagger generate client \
-		-f swagger/run.swagger.json \
-		-A run \
-		--principal models.Principal \
-		-c run_client \
-		-m run_model \
-		-t go_http_client
-	$(TMPDIR)/swagger generate client \
-		-f swagger/experiment.swagger.json \
-		-A experiment \
-		--principal models.Principal \
-		-c experiment_client \
-		-m experiment_model \
-		-t go_http_client
-	$(TMPDIR)/swagger generate client \
-		-f swagger/pipeline.upload.swagger.json \
-		-A pipeline_upload \
-		--principal models.Principal \
-		-c pipeline_upload_client \
-		-m pipeline_upload_model \
-		-t go_http_client
-	$(TMPDIR)/swagger generate client \
-		-f swagger/pipeline.swagger.json \
-		-A pipeline \
-		--principal models.Principal \
-		-c pipeline_client \
-		-m pipeline_model \
-		-t go_http_client
+# Push api-generator image remotely.
+.PHONY: push
+push: image
+	${CONTAINER_ENGINE} tag $(IMAGE_TAG) $(REMOTE_IMAGE)
+	${CONTAINER_ENGINE} push $(REMOTE_IMAGE)
 
-	# Hack to fix an issue with go-swagger
-	# See https://github.com/go-swagger/go-swagger/issues/1381 for details.
-	sed -i -- 's/MaxConcurrency int64 `json:"max_concurrency,omitempty"`/MaxConcurrency int64 `json:"max_concurrency,omitempty,string"`/g' ./go_http_client/job_model/api_job.go
-	sed -i -- 's/IntervalSecond int64 `json:"interval_second,omitempty"`/IntervalSecond int64 `json:"interval_second,omitempty,string"`/g' ./go_http_client/job_model/api_periodic_schedule.go
-	sed -i -- 's/MaxConcurrency string `json:"max_concurrency,omitempty"`/MaxConcurrency int64 `json:"max_concurrency,omitempty,string"`/g' ./go_http_client/job_model/api_job.go
-	sed -i -- 's/IntervalSecond string `json:"interval_second,omitempty"`/IntervalSecond int64 `json:"interval_second,omitempty,string"`/g' ./go_http_client/job_model/api_periodic_schedule.go
-
-	# Executes the //go:generate directives in the generated code.
-	go generate ./...
-
-	# Add licenses to the generated files.
-	# Instructions to install the 'autogen' command are located here:
-	# https://github.com/mbrukman/autogen
-	find ./ -name "*.go" -exec autogen.sh -i --no-tlc -c "Google LLC" -l apache {} \;
-
-	@echo "Cleaning $(TMPDIR)"
-	rm -r -f $(TMPDIR)
+# .image-built is a local token file to help Make determine the latest successful build.
+# Uses Docker layer caching for improved performance.
+.image-built: Dockerfile ../../go.mod tools/go.mod tools/go.sum
+	DOCKER_BUILDKIT=1 ${CONTAINER_ENGINE} build ../.. -t $(IMAGE_TAG) -f Dockerfile \
+		--cache-from $(IMAGE_TAG):latest
+	touch .image-built

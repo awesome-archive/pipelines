@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import * as React from 'react';
+import type * as React from 'react';
 import Viewer, { ViewerConfig, PlotType } from './Viewer';
 import { color, commonCss, fontsize } from '../../Css';
 import { classes, stylesheet } from 'typestyle';
@@ -38,19 +38,8 @@ interface ConfusionMatrixState {
 }
 
 class ConfusionMatrix extends Viewer<ConfusionMatrixProps, ConfusionMatrixState> {
-  private _opacities: number[][] = [];
-  private _config = this.props.configs[0];
-  private _max = this._config &&
-    Math.max(...this._config.data.map(d => d.map(n => +n)).map(d => Math.max(...d)));
   private _minRegularCellDimension = 15;
   private _maxRegularCellDimension = 80;
-  private _cellDimension = this._config ?
-    Math.max(
-      Math.min(
-        (this.props.maxDimension || 700) / this._config.data.length,
-        this._maxRegularCellDimension),
-      this._minRegularCellDimension) - 1 :
-    0;
   private _shrinkThreshold = 600;
 
   private _css = stylesheet({
@@ -62,13 +51,9 @@ class ConfusionMatrix extends Viewer<ConfusionMatrixProps, ConfusionMatrixState>
     cell: {
       border: 'solid 1px ' + color.background,
       fontSize: this._isSmall() ? fontsize.small : fontsize.base,
-      height: this._cellDimension,
-      minHeight: this._cellDimension,
-      minWidth: this._cellDimension,
       position: 'relative',
       textAlign: 'center',
       verticalAlign: 'middle',
-      width: this._cellDimension,
     },
     legend: {
       background: `linear-gradient(${color.theme}, ${color.background})`,
@@ -102,7 +87,6 @@ class ConfusionMatrix extends Viewer<ConfusionMatrixProps, ConfusionMatrixState>
     root: {
       flexGrow: 1,
       justifyContent: 'center',
-      margin: 'auto',
       pointerEvents: this._isSmall() ? 'none' : 'initial', // Disable interaction for snapshot view
       position: 'relative',
       width: 'fit-content',
@@ -111,19 +95,14 @@ class ConfusionMatrix extends Viewer<ConfusionMatrixProps, ConfusionMatrixState>
       color: color.foreground,
       fontSize: 15,
       fontWeight: 'bold',
-      paddingLeft: 20,
-      position: 'absolute',
+      paddingTop: 12,
+      textAlign: 'center',
     },
     xlabel: {
-      marginLeft: 15,
-      overflow: 'hidden',
-      position: 'absolute',
-      textAlign: 'left',
-      textOverflow: 'ellipsis',
-      transform: 'rotate(60deg)',
-      transformOrigin: 'left',
-      whiteSpace: 'nowrap',
-      width: 150,
+      fontWeight: 'normal',
+      paddingTop: 8,
+      textAlign: 'center',
+      verticalAlign: 'top',
     },
     yAxisLabel: {
       color: color.foreground,
@@ -133,9 +112,7 @@ class ConfusionMatrix extends Viewer<ConfusionMatrixProps, ConfusionMatrixState>
       textAlign: 'right',
     },
     ylabel: {
-      lineHeight: `${this._cellDimension}px`,
       marginRight: 10,
-      minWidth: this._cellDimension,
       textAlign: 'right',
       whiteSpace: 'nowrap',
     },
@@ -143,84 +120,171 @@ class ConfusionMatrix extends Viewer<ConfusionMatrixProps, ConfusionMatrixState>
 
   constructor(props: any) {
     super(props);
-
-    if (!this._config) {
-      return;
-    }
-
     this.state = {
       activeCell: [-1, -1],
     };
-
-    for (const i of this._config.data) {
-      const row = [];
-      for (const j of i) {
-        row.push(+j / this._max);
-      }
-      this._opacities.push(row);
-    }
   }
 
   public getDisplayName(): string {
     return 'Confusion matrix';
   }
 
-  public render(): JSX.Element | null {
-    if (!this._config) {
+  public render(): React.JSX.Element | null {
+    const config = this.props.configs[0];
+    if (!config) {
       return null;
     }
 
+    const { cellDimension, max, opacities, uiData } = this._buildViewModel(config);
     const [activeRow, activeCol] = this.state.activeCell;
-    const [xAxisLabel, yAxisLabel] = this._config.axes;
+    const [xAxisLabel, yAxisLabel] = config.axes;
     const small = this._isSmall();
 
-    return <div className={classes(commonCss.flex, this._css.root)}>
-      <table>
-        <tbody>
-          {!small && <tr><td className={this._css.yAxisLabel}>{yAxisLabel}</td></tr>}
-          {this._config.data.map((row, r) => <tr key={r}>
-            {!small && <td>
-              <div className={classes(this._css.ylabel, r === activeRow ? this._css.activeLabel : '')}>
-                {this._config.labels[r]}
-              </div>
-            </td>}
-            {row.map((cell, c) =>
-              <td key={c} className={this._css.cell} style={{
-                backgroundColor: `rgba(41, 121, 255, ${this._opacities[r][c]})`,
-                color: this._opacities[r][c] < 0.6 ? color.foreground : color.background,
-              }} onMouseOver={() => this.setState({ activeCell: [r, c] })}>
-                <div className={this._css.overlay} style={{
-                  opacity: r === activeRow || c === activeCol ? 0.05 : 0,
-                }} />
-                {cell}
-              </td>)}
-          </tr>)}
+    return (
+      <div className={classes(commonCss.flex, this._css.root)}>
+        <table>
+          <tbody>
+            {!small && (
+              <tr>
+                <td className={this._css.yAxisLabel}>{yAxisLabel}</td>
+              </tr>
+            )}
+            {uiData.map((row, r) => (
+              <tr key={r}>
+                {!small && (
+                  <td>
+                    <div
+                      className={classes(
+                        this._css.ylabel,
+                        r === activeRow ? this._css.activeLabel : '',
+                      )}
+                      style={{ lineHeight: `${cellDimension}px`, minWidth: cellDimension }}
+                    >
+                      {
+                        config.labels[
+                          config.labels.length - 1 - r
+                        ] /* uiData's ith's row corresponds to the reverse ordered label */
+                      }
+                    </div>
+                  </td>
+                )}
+                {row.map((cell, c) => (
+                  <td
+                    key={c}
+                    className={this._css.cell}
+                    style={{
+                      backgroundColor: `rgba(41, 121, 255, ${opacities[r][c]})`,
+                      color: opacities[r][c] < 0.6 ? color.foreground : color.background,
+                      height: cellDimension,
+                      minHeight: cellDimension,
+                      minWidth: cellDimension,
+                      width: cellDimension,
+                    }}
+                    onMouseOver={() => this.setState({ activeCell: [r, c] })}
+                    onMouseLeave={() =>
+                      this.setState((state) => ({
+                        // Remove active cell if it's still the one active
+                        activeCell:
+                          state.activeCell[0] === r && state.activeCell[1] === c
+                            ? [-1, -1]
+                            : state.activeCell,
+                      }))
+                    }
+                  >
+                    <div
+                      className={this._css.overlay}
+                      style={{
+                        opacity: r === activeRow || c === activeCol ? 0.05 : 0,
+                      }}
+                    />
+                    {cell}
+                  </td>
+                ))}
+              </tr>
+            ))}
 
-          {/* Footer */}
-          {!small && <tr>
-            <th className={this._css.xlabel} />
-            {this._config.labels.map((label, i) => <th key={i}>
-              <div className={classes(i === activeCol ? this._css.activeLabel : '', this._css.xlabel)}>
-                {label}
-              </div>
-            </th>)}
-            <td className={this._css.xAxisLabel}>{xAxisLabel}</td>
-          </tr>}
-        </tbody>
-      </table>
+            {/* Footer */}
+            {!small && (
+              <>
+                <tr>
+                  <th />
+                  {config.labels.map((label, i) => (
+                    <th key={i} scope='col' className={this._css.xlabel}>
+                      <div
+                        className={i === activeCol ? this._css.activeLabel : ''}
+                        style={{ overflowWrap: 'anywhere', width: cellDimension }}
+                      >
+                        {label}
+                      </div>
+                    </th>
+                  ))}
+                </tr>
+                <tr>
+                  <td />
+                  <td colSpan={config.labels.length} className={this._css.xAxisLabel}>
+                    {xAxisLabel}
+                  </td>
+                </tr>
+              </>
+            )}
+          </tbody>
+        </table>
 
-      {!small && <div className={this._css.legend}
-        style={{ height: 0.75 * this._config.data.length * this._cellDimension }}>
-        <div className={this._css.legendNotch} style={{ top: 0 }}>
-          <span className={this._css.legendLabel}>{this._max}</span>
-        </div>
-        {new Array(legendNotches).fill(0).map((_, i) =>
-          <div key={i} className={this._css.legendNotch}
-            style={{ top: ((legendNotches - i) / legendNotches * 100) + '%' }}>
-            <span className={this._css.legendLabel}>{Math.floor(i / legendNotches * this._max)}</span>
-          </div>)}
-      </div>}
-    </div>;
+        {!small && (
+          <div
+            className={this._css.legend}
+            style={{ height: 0.75 * config.data.length * cellDimension }}
+          >
+            <div className={this._css.legendNotch} style={{ top: 0 }}>
+              <span className={this._css.legendLabel}>{max}</span>
+            </div>
+            {new Array(legendNotches).fill(0).map((_, i) => (
+              <div
+                key={i}
+                className={this._css.legendNotch}
+                style={{ top: ((legendNotches - i) / legendNotches) * 100 + '%' }}
+              >
+                <span className={this._css.legendLabel}>
+                  {Math.floor((i / legendNotches) * max)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  private _buildViewModel(config: ConfusionMatrixConfig): {
+    cellDimension: number;
+    max: number;
+    opacities: number[][];
+    uiData: number[][];
+  } {
+    const max = Math.max(...config.data.map((row) => Math.max(...row.map((value) => +value))));
+    const cellDimension =
+      Math.max(
+        Math.min(
+          (this.props.maxDimension || 700) / config.data.length,
+          this._maxRegularCellDimension,
+        ),
+        this._minRegularCellDimension,
+      ) - 1;
+    const labelCount = config.labels?.length || 0;
+    const uiData: number[][] = new Array(labelCount)
+      .fill(undefined)
+      .map(() => new Array(labelCount));
+    for (let i = 0; i < labelCount; ++i) {
+      for (let j = 0; j < labelCount; ++j) {
+        uiData[labelCount - 1 - j][i] = config.data[i]?.[j];
+      }
+    }
+    return {
+      cellDimension,
+      max,
+      opacities: uiData.map((row) => row.map((value) => +value / max)),
+      uiData,
+    };
   }
 
   private _isSmall(): boolean {

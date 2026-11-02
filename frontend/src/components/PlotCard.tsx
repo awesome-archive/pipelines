@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,17 +15,15 @@
  */
 
 import * as React from 'react';
-import Button from '@material-ui/core/Button';
-import CloseIcon from '@material-ui/icons/Close';
-import Dialog from '@material-ui/core/Dialog';
-import Paper from '@material-ui/core/Paper';
-import PopOutIcon from '@material-ui/icons/Launch';
+import CloseIcon from '@mui/icons-material/Close';
+import PopOutIcon from '@mui/icons-material/Launch';
 import Separator from '../atoms/Separator';
-import Tooltip from '@material-ui/core/Tooltip';
 import ViewerContainer, { componentMap } from '../components/viewers/ViewerContainer';
 import { ViewerConfig } from '../components/viewers/Viewer';
 import { color, fontsize } from '../Css';
 import { stylesheet, classes } from 'typestyle';
+
+import { Button, Dialog, Paper, Tooltip } from '@mui/material';
 
 const css = stylesheet({
   dialogTitle: {
@@ -62,7 +60,7 @@ const css = stylesheet({
     margin: 20,
     minWidth: 250,
     padding: 20,
-    width: 'min-content',
+    width: 'auto',
   },
   plotHeader: {
     display: 'flex',
@@ -83,7 +81,7 @@ const css = stylesheet({
 export interface PlotCardProps {
   title: string;
   configs: ViewerConfig[];
-  maxDimension: number;
+  maxDimension?: number;
 }
 
 interface PlotCardState {
@@ -100,49 +98,65 @@ class PlotCard extends React.Component<PlotCardProps, PlotCardState> {
   }
 
   public shouldComponentUpdate(nextProps: PlotCardProps, nextState: PlotCardState): boolean {
-    return JSON.stringify(nextProps) !== JSON.stringify(this.props) ||
-      nextState.fullscreenDialogOpen !== this.state.fullscreenDialogOpen;
+    return (
+      JSON.stringify(nextProps) !== JSON.stringify(this.props) ||
+      nextState.fullscreenDialogOpen !== this.state.fullscreenDialogOpen
+    );
   }
 
-  public render(): JSX.Element | null {
+  public render(): React.JSX.Element | null {
     const { title, configs, maxDimension, ...otherProps } = this.props;
 
     if (!configs || !configs.length) {
       return null;
     }
 
-    return <div>
-      <Paper {...otherProps} className={classes(css.plotCard, 'plotCard')}>
-        <div className={css.plotHeader}>
-          <div className={css.plotTitle} title={title}>{title}</div>
-          <div>
-            <Button onClick={() => this.setState({ fullscreenDialogOpen: true })}
-              style={{ padding: 4, minHeight: 0, minWidth: 0 }} className='popOutButton'>
-              <Tooltip title='Pop out'>
-                <PopOutIcon classes={{ root: css.popoutIcon }} />
-              </Tooltip>
-            </Button>
+    return (
+      <div>
+        <Paper {...otherProps} className={classes(css.plotCard, 'plotCard')}>
+          <div className={css.plotHeader}>
+            <div className={css.plotTitle} title={title}>
+              {title}
+            </div>
+            <div>
+              <Button
+                onClick={() => this.setState({ fullscreenDialogOpen: true })}
+                style={{ padding: 4, minHeight: 0, minWidth: 0 }}
+                className='popOutButton'
+                data-testid='pop-out-button'
+              >
+                <Tooltip title='Pop out'>
+                  <PopOutIcon classes={{ root: css.popoutIcon }} />
+                </Tooltip>
+              </Button>
+            </div>
           </div>
-        </div>
-        <ViewerContainer configs={configs} maxDimension={maxDimension} />
-      </Paper>
+          <ViewerContainer configs={configs} maxDimension={maxDimension} />
+        </Paper>
 
-      <Dialog open={!!this.state.fullscreenDialogOpen} classes={{ paper: css.fullscreenDialog }}
-        onClose={() => this.setState({ fullscreenDialogOpen: false })}>
-        <div className={css.dialogTitle}>
-          <Button onClick={() => this.setState({ fullscreenDialogOpen: false })}
-            className={classes(css.fullscreenCloseBtn, 'fullscreenCloseButton')}>
-            <CloseIcon />
-          </Button>
-          {componentMap[configs[0].type].prototype.getDisplayName()}
-          <Separator />
-          <span style={{ color: color.inactive }}>({title})</span>
-        </div>
-        <div className={css.fullscreenViewerContainer}>
-          <ViewerContainer configs={configs} />
-        </div>
-      </Dialog>
-    </div>;
+        <Dialog
+          open={!!this.state.fullscreenDialogOpen}
+          classes={{ paper: css.fullscreenDialog }}
+          onClose={() => this.setState({ fullscreenDialogOpen: false })}
+        >
+          <div className={css.dialogTitle}>
+            <Button
+              onClick={() => this.setState({ fullscreenDialogOpen: false })}
+              className={classes(css.fullscreenCloseBtn, 'fullscreenCloseButton')}
+              data-testid='fullscreen-close-button'
+            >
+              <CloseIcon />
+            </Button>
+            {componentMap[configs[0].type].prototype.getDisplayName()}
+            <Separator />
+            <span style={{ color: color.inactive }}>({title})</span>
+          </div>
+          <div className={css.fullscreenViewerContainer}>
+            <ViewerContainer configs={configs} />
+          </div>
+        </Dialog>
+      </div>
+    );
   }
 }
 

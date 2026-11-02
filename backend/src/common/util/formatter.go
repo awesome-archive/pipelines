@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/argoproj/argo/pkg/apis/workflow/v1alpha1"
+	"github.com/argoproj/argo-workflows/v4/pkg/apis/workflow/v1alpha1"
 	"github.com/golang/glog"
 )
 
@@ -30,8 +30,8 @@ type WorkflowFormatter struct {
 }
 
 func NewWorkflowFormatter(uuid UUIDGeneratorInterface, scheduledAtInSec int64,
-	nowInSec int64) *WorkflowFormatter {
-
+	nowInSec int64,
+) *WorkflowFormatter {
 	if uuid == nil {
 		glog.Fatalf("A UUID generator must be specified.") // Should never happen.
 	}
@@ -60,7 +60,6 @@ func (p *WorkflowFormatter) Format(workflow *v1alpha1.Workflow) error {
 }
 
 func getWorkflowName(workflow *v1alpha1.Workflow) string {
-
 	const (
 		defaultWorkflowName = "workflow-"
 	)
@@ -94,14 +93,14 @@ func (p *WorkflowFormatter) formatWorkflowParameters(workflow *v1alpha1.Workflow
 }
 
 func (p *WorkflowFormatter) formatParameter(param v1alpha1.Parameter) (*v1alpha1.Parameter, error) {
-	formatted, err := p.formatString(*param.Value)
+	formatted, err := p.formatString(param.Value.String())
 	if err != nil {
 		return nil, err
 	}
 
 	return &v1alpha1.Parameter{
 		Name:  param.Name,
-		Value: &formatted,
+		Value: v1alpha1.AnyStringPtr(formatted),
 	}, nil
 }
 
@@ -126,7 +125,6 @@ func (p *WorkflowFormatter) formatString(s string) (string, error) {
 }
 
 func (p *WorkflowFormatter) createSubtitute(match string) (string, error) {
-
 	const (
 		schedulePrefix            = "[[schedule."
 		nowPrefix                 = "[[now."

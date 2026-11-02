@@ -1,6 +1,8 @@
 approvers:
-  - rileyjbauer
-  - yebrahim
+  - chensun
+  - HumairAK
+  - jeffspahr
+  - manaswinidas
 reviewers:
-  - yebrahim
-  - rileyjbauer
+  - mprahl
+  - droctothorpe

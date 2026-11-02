@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,7 +14,9 @@
 
 package model
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // PipelineStatus a label for the status of the Pipeline.
 // This is intend to make pipeline creation and deletion atomic.
@@ -24,16 +26,35 @@ const (
 	PipelineCreating PipelineStatus = "CREATING"
 	PipelineReady    PipelineStatus = "READY"
 	PipelineDeleting PipelineStatus = "DELETING"
+
+	NoNamespace string = "-"
 )
 
 type Pipeline struct {
-	UUID           string `gorm:"column:UUID; not null; primary_key"`
-	CreatedAtInSec int64  `gorm:"column:CreatedAtInSec; not null"`
-	Name           string `gorm:"column:Name; not null; unique"`
-	Description    string `gorm:"column:Description; not null"`
-	/* Set size to 65535 so it will be stored as longtext. https://dev.mysql.com/doc/refman/8.0/en/column-count-limit.html */
-	Parameters string         `gorm:"column:Parameters; not null; size:65535"`
-	Status     PipelineStatus `gorm:"column:Status; not null"`
+	UUID           string `gorm:"column:UUID; not null; primaryKey;type:varchar(64);"`
+	CreatedAtInSec int64  `gorm:"column:CreatedAtInSec; not null;"`
+	// Name is limited to varchar(128) to ensure the composite index (Namespace, Name)
+	// stays within MySQL’s 767-byte prefix limit for indexable columns.
+	// MySQL uses utf8mb4 encoding by default, where each character can take up to 4 bytes.
+	// In the worst case: 63 (namespace) * 4 + 128 (name) * 4 = 764 bytes ≤ 767 bytes.
+	// https://dev.mysql.com/doc/refman/8.4/en/column-indexes.html
+	// Even though Namespace rarely uses its full 63-character capacity in practice,
+	// MySQL calculates index length based on declared size, not actual content.
+	// Therefore, keeping Name at varchar(128) is a safe upper bound.
+	Name        string    `gorm:"column:Name; not null; uniqueIndex:namespace_name; type:varchar(128);"` // Index improves performance of the List and Get queries
+	DisplayName string    `gorm:"column:DisplayName; not null"`
+	Description LargeText `gorm:"column:Description; not null"`
+	// TODO(gkcalat): this is deprecated. Consider removing and adding data migration logic at the server startup.
+	Parameters LargeText      `gorm:"column:Parameters;"`
+	Status     PipelineStatus `gorm:"column:Status; not null;"`
+	// TODO(gkcalat): this is deprecated. Consider removing and adding data migration logic at the server startup.
+	DefaultVersionId string `gorm:"column:DefaultVersionId;"` // deprecated
+	// Namespace is restricted to varchar(63) due to Kubernetes' naming constraints:
+	// https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#dns-label-names
+	Namespace string `gorm:"column:Namespace; uniqueIndex:namespace_name; type:varchar(63);"`
+	// Tags holds user-defined key-value pairs. Stored in a separate
+	// pipeline_tags table, not in the pipelines table itself.
+	Tags map[string]string `gorm:"-"`
 }
 
 func (p Pipeline) GetValueOfPrimaryKey() string {
@@ -55,14 +76,71 @@ func (p *Pipeline) DefaultSortField() string {
 }
 
 var pipelineAPIToModelFieldMap = map[string]string{
-	"id":          "UUID",
-	"name":        "Name",
-	"created_at":  "CreatedAtInSec",
-	"description": "Description",
+	"id":           "UUID",        // Legacy filter alias retained in the v2 filter contract
+	"pipeline_id":  "UUID",        // v2 API
+	"name":         "Name",        // Legacy filter alias retained in the v2 filter contract
+	"display_name": "DisplayName", // v2 API
+	"created_at":   "CreatedAtInSec",
+	"description":  "Description",
+	"namespace":    "Namespace",
 }
 
 // APIToModelFieldMap returns a map from API names to field names for model
 // Pipeline.
 func (p *Pipeline) APIToModelFieldMap() map[string]string {
 	return pipelineAPIToModelFieldMap
+}
+
+// GetModelName returns table name used as sort field prefix.
+func (p *Pipeline) GetModelName() string {
+	return "pipelines"
+}
+
+// TableName overrides GORM's table name inference.
+func (Pipeline) TableName() string {
+	return "pipelines"
+}
+
+func (p *Pipeline) GetField(name string) (string, string, bool) {
+	if field, ok := pipelineAPIToModelFieldMap[name]; ok {
+		return field, field, true
+	}
+	return "", "", false
+}
+
+func (p *Pipeline) GetFieldValue(name string) interface{} {
+	switch name {
+	case "UUID":
+		return p.UUID
+	case "Name":
+		return p.Name
+	case "DisplayName":
+		return p.DisplayName
+	case "CreatedAtInSec":
+		return p.CreatedAtInSec
+	case "Description":
+		return p.Description
+	case "Namespace":
+		return p.Namespace
+	default:
+		return nil
+	}
+}
+
+func (p *Pipeline) GetSortByFieldPrefix(name string) string {
+	return "pipelines."
+}
+
+func (p *Pipeline) GetKeyFieldPrefix() string {
+	return "pipelines."
+}
+
+var pipelineCaseInsensitiveFields = map[string]struct{}{
+	"name":         {},
+	"display_name": {},
+	"description":  {},
+}
+
+func (p *Pipeline) CaseInsensitiveFields() map[string]struct{} {
+	return pipelineCaseInsensitiveFields
 }

@@ -1,5 +1,4 @@
-
-# Copyright 2018 Google LLC
+# Copyright 2018-2022 The Kubeflow Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,4 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ._client import Client
+try:
+    from .version import __version__
+except ImportError:
+    __version__ = 'dev'
+
+import sys
+
+if sys.version_info < (3, 11):
+    raise RuntimeError(
+        'KFP requires Python 3.11 or later. Upgrade your Python interpreter '
+        'before importing kfp.'
+    )
+
+TYPE_CHECK = True
+
+import os
+
+# compile-time only dependencies
+if os.environ.get('_KFP_RUNTIME', 'false') != 'true':
+    # make `from kfp import components` and `from kfp import dsl` valid;
+    # related to namespace packaging issue
+    from kfp import components, dsl
+    from kfp.client import Client

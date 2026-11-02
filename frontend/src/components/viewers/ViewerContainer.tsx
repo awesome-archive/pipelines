@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,16 +14,18 @@
  * limitations under the License.
  */
 
-import * as React from 'react';
+import React, { ComponentType } from 'react';
 import ConfusionMatrix from './ConfusionMatrix';
 import HTMLViewer from './HTMLViewer';
+import MarkdownViewer from './MarkdownViewer';
 import PagedTable from './PagedTable';
 import ROCCurve from './ROCCurve';
 import TensorboardViewer from './Tensorboard';
 import { PlotType, ViewerConfig } from './Viewer';
 
-export const componentMap = {
+export const componentMap: Record<PlotType, ComponentType<any>> = {
   [PlotType.CONFUSION_MATRIX]: ConfusionMatrix,
+  [PlotType.MARKDOWN]: MarkdownViewer,
   [PlotType.ROC]: ROCCurve,
   [PlotType.TABLE]: PagedTable,
   [PlotType.TENSORBOARD]: TensorboardViewer,
@@ -36,13 +38,12 @@ interface ViewerContainerProps {
 }
 
 class ViewerContainer extends React.Component<ViewerContainerProps> {
-  public render(): JSX.Element | null {
+  public render(): React.JSX.Element | null {
     const { configs, maxDimension } = this.props;
     if (!configs.length) {
       return null;
     }
 
-    // tslint:disable-next-line:variable-name
     const Component = componentMap[configs[0].type];
     return <Component configs={configs as any} maxDimension={maxDimension} />;
   }

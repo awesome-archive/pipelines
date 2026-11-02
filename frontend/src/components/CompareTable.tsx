@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ const css = stylesheet({
     padding: 5,
   },
   labelCell: {
-    backgroundColor: '#eee',
+    backgroundColor: color.lightGrey,
     fontWeight: 'bold',
     maxWidth: 200,
     minWidth: 50,
@@ -49,19 +49,36 @@ const css = stylesheet({
   },
 });
 
+export interface xParentLabel {
+  label: string;
+  colSpan: number;
+}
+
 export interface CompareTableProps {
   rows: string[][];
   xLabels: string[];
   yLabels: string[];
+  xParentLabels?: xParentLabel[];
 }
 
 class CompareTable extends React.PureComponent<CompareTableProps> {
-  public render(): JSX.Element | null {
-    const { rows, xLabels, yLabels } = this.props;
+  public render(): React.JSX.Element | null {
+    const { rows, xLabels, yLabels, xParentLabels } = this.props;
     if (rows.length !== yLabels.length) {
       logger.error(
-        `Number of rows (${rows.length}) should match the number of Y labels (${yLabels.length}).`);
+        `Number of rows (${rows.length}) should match the number of Y labels (${yLabels.length}).`,
+      );
     }
+
+    const xParentLabelsLength =
+      xParentLabels &&
+      xParentLabels.reduce((length, xParentLabel) => length + xParentLabel.colSpan, 0);
+    if (xParentLabels && xParentLabelsLength !== xLabels.length) {
+      logger.error(
+        `Number of columns with data (${xLabels.length}) should match the aggregated length of parent columns (${xParentLabelsLength}).`,
+      );
+    }
+
     if (!rows || rows.length === 0) {
       return null;
     }
@@ -69,20 +86,44 @@ class CompareTable extends React.PureComponent<CompareTableProps> {
     return (
       <table className={css.root}>
         <tbody>
+          {xParentLabels && xParentLabelsLength === xLabels.length && (
+            <tr className={css.row}>
+              <td className={css.labelCell} />
+              {/* X parent labels row */}
+              {xParentLabels.map((parentLabel, i) => (
+                <td
+                  key={i}
+                  className={classes(css.cell, css.labelCell)}
+                  title={parentLabel.label}
+                  colSpan={parentLabel.colSpan}
+                >
+                  {parentLabel.label}
+                </td>
+              ))}
+            </tr>
+          )}
           <tr className={css.row}>
             <td className={css.labelCell} />
             {/* X labels row */}
             {xLabels.map((label, i) => (
-              <td key={i} className={classes(css.cell, css.labelCell)} title={label}>{label}</td>
+              <td key={i} className={classes(css.cell, css.labelCell)} title={label}>
+                {label}
+              </td>
             ))}
           </tr>
           {rows.map((row, i) => (
             <tr key={i} className={css.row}>
               {/* Y label */}
-              <td className={classes(css.cell, css.labelCell)} title={yLabels[i]}>{yLabels[i]}</td>
+              <td className={classes(css.cell, css.labelCell)} title={yLabels[i]}>
+                {yLabels[i]}
+              </td>
 
               {/* Row cells */}
-              {row.map((cell, j) => <td key={j} className={css.cell} title={cell}>{cell}</td>)}
+              {row.map((cell, j) => (
+                <td key={j} className={css.cell} title={cell}>
+                  {cell}
+                </td>
+              ))}
             </tr>
           ))}
         </tbody>

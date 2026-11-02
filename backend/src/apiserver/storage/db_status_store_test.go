@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,12 +21,13 @@ import (
 )
 
 func TestInitializeDBStatusTable(t *testing.T) {
-	db := NewFakeDbOrFatal()
+	db, testDialect := NewFakeDBOrFatal()
 	defer db.Close()
-	dBStatusStore := NewDBStatusStore(db)
+	dBStatusStore, err := NewDBStatusStore(db, testDialect)
+	assert.Nil(t, err)
 
 	// Initialize for the first time
-	err := dBStatusStore.InitializeDBStatusTable()
+	err = dBStatusStore.InitializeDBStatusTable()
 	assert.Nil(t, err)
 	// Initialize again should be no-op and no error
 	err = dBStatusStore.InitializeDBStatusTable()
@@ -41,14 +42,15 @@ func TestInitializeDBStatusTable(t *testing.T) {
 }
 
 func TestMarkSampleLoaded(t *testing.T) {
-	db := NewFakeDbOrFatal()
+	db, testDialect := NewFakeDBOrFatal()
 	defer db.Close()
-	dBStatusStore := NewDBStatusStore(db)
+	dBStatusStore, err := NewDBStatusStore(db, testDialect)
+	assert.Nil(t, err)
 
 	// Initialize for the first time
-	err := dBStatusStore.InitializeDBStatusTable()
+	err = dBStatusStore.InitializeDBStatusTable()
 	assert.Nil(t, err)
-	// Initialize again should be no-op and no error
+	// Mark the samples as loaded
 	err = dBStatusStore.MarkSampleLoaded()
 	assert.Nil(t, err)
 	haveSamplesLoaded, err := dBStatusStore.HaveSamplesLoaded()

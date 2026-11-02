@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,11 +15,9 @@
 package client
 
 import (
+	"context"
 	"time"
 
-	workflowapi "github.com/argoproj/argo/pkg/apis/workflow/v1alpha1"
-	workflowclientset "github.com/argoproj/argo/pkg/client/clientset/versioned"
-	"github.com/argoproj/argo/pkg/client/informers/externalversions/workflow/v1alpha1"
 	commonutil "github.com/kubeflow/pipelines/backend/src/common/util"
 	"github.com/kubeflow/pipelines/backend/src/crd/controller/scheduledworkflow/util"
 	swfapi "github.com/kubeflow/pipelines/backend/src/crd/pkg/apis/scheduledworkflow/v1beta1"
@@ -32,13 +30,13 @@ import (
 
 // WorkflowClient is a client to call the Workflow API.
 type WorkflowClient struct {
-	clientSet workflowclientset.Interface
-	informer  v1alpha1.WorkflowInformer
+	clientSet commonutil.ExecutionClient
+	informer  commonutil.ExecutionInformer
 }
 
 // NewWorkflowClient creates an instance of the WorkflowClient.
-func NewWorkflowClient(clientSet workflowclientset.Interface,
-	informer v1alpha1.WorkflowInformer) *WorkflowClient {
+func NewWorkflowClient(clientSet commonutil.ExecutionClient,
+	informer commonutil.ExecutionInformer) *WorkflowClient {
 	return &WorkflowClient{
 		clientSet: clientSet,
 		informer:  informer,
@@ -46,34 +44,33 @@ func NewWorkflowClient(clientSet workflowclientset.Interface,
 }
 
 // AddEventHandler adds an event handler.
-func (p *WorkflowClient) AddEventHandler(funcs *cache.ResourceEventHandlerFuncs) {
-	p.informer.Informer().AddEventHandler(funcs)
+func (p *WorkflowClient) AddEventHandler(funcs *cache.ResourceEventHandlerFuncs) (cache.ResourceEventHandlerRegistration, error) {
+	return p.informer.AddEventHandler(funcs)
 }
 
 // HasSynced returns true if the shared informer's store has synced.
 func (p *WorkflowClient) HasSynced() func() bool {
-	return p.informer.Informer().HasSynced
+	return p.informer.HasSynced()
 }
 
 // Get returns a Workflow, given a namespace and name.
 func (p *WorkflowClient) Get(namespace string, name string) (
-	wf *commonutil.Workflow, isNotFoundError bool, err error) {
-	workflow, err := p.informer.Lister().Workflows(namespace).Get(name)
-	if err != nil {
-		return nil, commonutil.IsNotFound(err), wraperror.Wrapf(err,
-			"Error retrieving workflow (%v) in namespace (%v): %v", name, namespace, err)
-	}
-	return commonutil.NewWorkflow(workflow), false, nil
+	wf commonutil.ExecutionSpec, isNotFoundError bool, err error) {
+
+	return p.informer.Get(namespace, name)
 }
 
-// List returns a list of workflows given the name of their ScheduledWorkflow,
-// whether they are completed, and their minimum index (to avoid returning the whole list).
-func (p *WorkflowClient) List(swfName string, completed bool, minIndex int64) (
+// List returns a list of workflows in the given namespace given the name of
+// their ScheduledWorkflow, whether they are completed, and their minimum index
+// (to avoid returning the whole list). The namespace scope prevents workflows
+// in other namespaces from being counted against this ScheduledWorkflow when
+// the controller runs cluster-wide in multi-user mode.
+func (p *WorkflowClient) List(namespace string, swfName string, completed bool, minIndex int64) (
 	status []swfapi.WorkflowStatus, err error) {
 
 	labelSelector := getLabelSelectorToGetWorkflows(swfName, completed, minIndex)
 
-	workflows, err := p.informer.Lister().List(*labelSelector)
+	workflows, err := p.informer.List(namespace, labelSelector)
 	if err != nil {
 		return nil, wraperror.Wrapf(err,
 			"Could not retrieve workflows for scheduled workflow (%v): %v", swfName, err)
@@ -84,7 +81,7 @@ func (p *WorkflowClient) List(swfName string, completed bool, minIndex int64) (
 	return result, nil
 }
 
-func toWorkflowStatuses(workflows []*workflowapi.Workflow) []swfapi.WorkflowStatus {
+func toWorkflowStatuses(workflows commonutil.ExecutionSpecList) []swfapi.WorkflowStatus {
 	result := make([]swfapi.WorkflowStatus, 0)
 	for _, workflow := range workflows {
 		result = append(result, *toWorkflowStatus(workflow))
@@ -92,36 +89,40 @@ func toWorkflowStatuses(workflows []*workflowapi.Workflow) []swfapi.WorkflowStat
 	return result
 }
 
-func toWorkflowStatus(workflow *workflowapi.Workflow) *swfapi.WorkflowStatus {
+func toWorkflowStatus(workflow commonutil.ExecutionSpec) *swfapi.WorkflowStatus {
+	objMeta := workflow.ExecutionObjectMeta()
+	execStatus := workflow.ExecutionStatus()
 	return &swfapi.WorkflowStatus{
-		Name:        workflow.Name,
-		Namespace:   workflow.Namespace,
-		SelfLink:    workflow.SelfLink,
-		UID:         workflow.UID,
-		Phase:       workflow.Status.Phase,
-		Message:     workflow.Status.Message,
-		CreatedAt:   workflow.CreationTimestamp,
-		StartedAt:   workflow.Status.StartedAt,
-		FinishedAt:  workflow.Status.FinishedAt,
+		Name:        workflow.ExecutionName(),
+		Namespace:   workflow.ExecutionNamespace(),
+		SelfLink:    objMeta.SelfLink,
+		UID:         objMeta.UID,
+		Phase:       execStatus.Condition(),
+		Message:     execStatus.Message(),
+		CreatedAt:   objMeta.CreationTimestamp,
+		StartedAt:   execStatus.StartedAtTime(),
+		FinishedAt:  execStatus.FinishedAtTime(),
 		ScheduledAt: retrieveScheduledTime(workflow),
 		Index:       retrieveIndex(workflow),
 	}
 }
 
-func retrieveScheduledTime(workflow *workflowapi.Workflow) metav1.Time {
-	value, ok := workflow.Labels[commonutil.LabelKeyWorkflowEpoch]
+func retrieveScheduledTime(workflow commonutil.ExecutionSpec) metav1.Time {
+	objMeta := workflow.ExecutionObjectMeta()
+	value, ok := objMeta.Labels[commonutil.LabelKeyWorkflowEpoch]
 	if !ok {
-		return workflow.CreationTimestamp
+		return objMeta.CreationTimestamp
 	}
 	result, err := commonutil.RetrieveInt64FromLabel(value)
 	if err != nil {
-		return workflow.CreationTimestamp
+		return objMeta.CreationTimestamp
 	}
 	return metav1.NewTime(time.Unix(result, 0).UTC())
 }
 
-func retrieveIndex(workflow *workflowapi.Workflow) int64 {
-	value, ok := workflow.Labels[commonutil.LabelKeyWorkflowIndex]
+func retrieveIndex(workflow commonutil.ExecutionSpec) int64 {
+	objMeta := workflow.ExecutionObjectMeta()
+	value, ok := objMeta.Labels[commonutil.LabelKeyWorkflowIndex]
 	if !ok {
 		return 0
 	}
@@ -133,21 +134,21 @@ func retrieveIndex(workflow *workflowapi.Workflow) int64 {
 }
 
 // Create creates a workflow given a namespace and its specification.
-func (p *WorkflowClient) Create(namespace string, workflow *commonutil.Workflow) (
-	*commonutil.Workflow, error) {
-	result, err := p.clientSet.ArgoprojV1alpha1().Workflows(namespace).Create(workflow.Get())
+func (p *WorkflowClient) Create(ctx context.Context, namespace string, workflow commonutil.ExecutionSpec) (
+	commonutil.ExecutionSpec, error) {
+	result, err := p.clientSet.Execution(namespace).Create(ctx, workflow, metav1.CreateOptions{})
 	if err != nil {
 		return nil, wraperror.Wrapf(err, "Error creating workflow in namespace (%v): %v: %+v", namespace,
-			err, workflow.Get())
+			err, workflow.ToStringForStore())
 	}
-	return commonutil.NewWorkflow(result), nil
+	return result, nil
 }
 
 func getLabelSelectorToGetWorkflows(swfName string, completed bool, minIndex int64) *labels.Selector {
 	labelSelector := labels.NewSelector()
 	// The Argo workflow should be active or completed
 	labelSelector = labelSelector.Add(*util.GetRequirementForCompletedWorkflowOrFatal(completed))
-	// The Argo workflow should be labelled with this scheduled workflow name.
+	// The Argo workflow should be labeled with this scheduled workflow name.
 	labelSelector = labelSelector.Add(*util.GetRequirementForScheduleNameOrFatal(swfName))
 	// The Argo workflow should have an index greater than...
 	labelSelector = labelSelector.Add(*util.GetRequirementForMinIndexOrFatal(minIndex))

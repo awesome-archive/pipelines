@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,16 +15,17 @@
  */
 
 import * as React from 'react';
-import Button from '@material-ui/core/Button';
 import Separator from './Separator';
 import { color, fontsize } from '../Css';
 import { classes, stylesheet } from 'typestyle';
 import { logger } from '../lib/Utils';
 
+import { Button, Tooltip } from '@mui/material';
+
 interface MD2TabsProps {
   onSwitch?: (tab: number) => void;
   selectedTab: number;
-  tabs: string[];
+  tabs: (string | { header: string; tooltip: string })[];
 }
 
 const css = stylesheet({
@@ -66,24 +67,38 @@ const css = stylesheet({
 });
 
 class MD2Tabs extends React.Component<MD2TabsProps, any> {
-
   private _rootRef = React.createRef<any>();
   private _indicatorRef = React.createRef<any>();
-  private _tabRefs = this.props.tabs.map(t => React.createRef<HTMLSpanElement>());
-  private _timeoutHandle = 0;
+  private _tabRefs = this.props.tabs.map((_tab) => React.createRef<HTMLSpanElement>());
+  private _timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
-  public render(): JSX.Element {
+  public render(): React.JSX.Element {
     const selected = this._getSelectedIndex();
     const switchHandler = this.props.onSwitch || (() => null);
+    const tabs = this.props.tabs.map((tab) => {
+      if (typeof tab === 'string') {
+        return { header: tab, tooltip: '' };
+      }
+      return tab;
+    });
     return (
       <div className={css.tabs} ref={this._rootRef}>
         <div className={css.indicator} ref={this._indicatorRef} />
         <Separator units={20} />
-        {this.props.tabs.map((tab, i) => (
-          <Button className={classes(css.button, i === selected ? css.active : '')} key={i}
-            onClick={() => { if (i !== selected) { switchHandler(i); } }}>
-            <span ref={this._tabRefs[i]}>{tab}</span>
-          </Button>
+        {tabs.map((tab, i) => (
+          <Tooltip title={tab.tooltip} placement='top-start' key={i}>
+            <Button
+              className={classes(css.button, i === selected ? css.active : '')}
+              key={i}
+              onClick={() => {
+                if (i !== selected) {
+                  switchHandler(i);
+                }
+              }}
+            >
+              <span ref={this._tabRefs[i]}>{tab.header}</span>
+            </Button>
+          </Tooltip>
         ))}
       </div>
     );
@@ -98,7 +113,9 @@ class MD2Tabs extends React.Component<MD2TabsProps, any> {
   }
 
   public componentWillUnmount(): void {
-    clearTimeout(this._timeoutHandle);
+    if (this._timeoutHandle) {
+      clearTimeout(this._timeoutHandle);
+    }
   }
 
   private _getSelectedIndex(): number {
@@ -116,12 +133,14 @@ class MD2Tabs extends React.Component<MD2TabsProps, any> {
     if (!activeLabelElement) {
       return;
     }
-    const leftOffset = activeLabelElement.getBoundingClientRect().left -
+    const leftOffset =
+      activeLabelElement.getBoundingClientRect().left -
       this._rootRef.current.getBoundingClientRect().left;
 
     const tabIndicator = this._indicatorRef.current;
-    tabIndicator.style.left = (leftOffset - 5) + 'px';
-    tabIndicator.style.width = (activeLabelElement.getBoundingClientRect().width + 5) + 'px';
+    // Center the indicator's extra 5px of width around the label.
+    tabIndicator.style.left = leftOffset - 2.5 + 'px';
+    tabIndicator.style.width = activeLabelElement.getBoundingClientRect().width + 5 + 'px';
     tabIndicator.style.display = 'block';
   }
 }

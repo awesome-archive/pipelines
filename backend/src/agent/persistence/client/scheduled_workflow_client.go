@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,8 +38,8 @@ func NewScheduledWorkflowClient(informer v1beta1.ScheduledWorkflowInformer) *Sch
 }
 
 // AddEventHandler adds an event handler.
-func (c *ScheduledWorkflowClient) AddEventHandler(funcs *cache.ResourceEventHandlerFuncs) {
-	c.informer.Informer().AddEventHandler(funcs)
+func (c *ScheduledWorkflowClient) AddEventHandler(funcs *cache.ResourceEventHandlerFuncs) (cache.ResourceEventHandlerRegistration, error) {
+	return c.informer.Informer().AddEventHandler(funcs)
 }
 
 // HasSynced returns true if the shared informer's store has synced.
@@ -60,6 +60,12 @@ func (c *ScheduledWorkflowClient) Get(namespace string, name string) (
 		}
 		return nil, util.NewCustomError(err, code,
 			"Error retrieving scheduled workflow (%v) in namespace (%v): %v", name, namespace, err)
+	}
+
+	// If the APIVersion and Kind are not set then set them to the default values.
+	if schedule.APIVersion == "" && schedule.Kind == "" {
+		schedule.Kind = util.SwfKind
+		schedule.APIVersion = util.ApiVersionV1
 	}
 
 	return util.NewScheduledWorkflow(schedule), nil

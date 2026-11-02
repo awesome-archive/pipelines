@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,44 +14,93 @@
 
 package common
 
-import (
-	api "github.com/kubeflow/pipelines/backend/api/go_client"
-	"github.com/kubeflow/pipelines/backend/src/common/util"
-)
+const (
+	RbacKubeflowGroup    = "kubeflow.org"
+	RbacPipelinesGroup   = "pipelines.kubeflow.org"
+	RbacPipelinesVersion = "v1beta1"
 
-type ResourceType string
-type Relationship string
+	RbacResourceTypePipelines          = "pipelines"
+	RbacResourceTypeExperiments        = "experiments"
+	RbacResourceTypeRuns               = "runs"
+	RbacResourceTypeJobs               = "jobs"
+	RbacResourceTypeViewers            = "viewers"
+	RbacResourceTypeScheduledWorkflows = "scheduledworkflows"
+	RbacResourceTypeWorkflows          = "workflows"
+	RbacResourceTypeArtifacts          = "artifacts"
+
+	RbacResourceVerbArchive       = "archive"
+	RbacResourceVerbUpdate        = "update"
+	RbacResourceVerbCreate        = "create"
+	RbacResourceVerbDelete        = "delete"
+	RbacResourceVerbDisable       = "disable"
+	RbacResourceVerbEnable        = "enable"
+	RbacResourceVerbGet           = "get"
+	RbacResourceVerbList          = "list"
+	RbacResourceVerbRetry         = "retry"
+	RbacResourceVerbTerminate     = "terminate"
+	RbacResourceVerbUnarchive     = "unarchive"
+	RbacResourceVerbReportMetrics = "reportMetrics"
+	RbacResourceVerbReadArtifact  = "readArtifact"
+	RbacResourceVerbReadLog       = "readLog"
+	RbacResourceVerbReport        = "report"
+	RbacResourceVerbUse           = "use"
+)
 
 const (
-	Experiment ResourceType = "Experiment"
-	Job        ResourceType = "Job"
-	Run        ResourceType = "Run"
-	Pipeline   ResourceType = "pipeline"
+	GoogleIAPUserIdentityHeader    string = "x-goog-authenticated-user-email"
+	GoogleIAPUserIdentityPrefix    string = "accounts.google.com:"
+	AuthorizationBearerTokenHeader string = "Authorization"
+	AuthorizationBearerTokenPrefix string = "Bearer "
+)
+
+const DefaultTokenReviewAudience string = "pipelines.kubeflow.org"
+
+// TokenAudienceRunPrefix is appended to the token-review audience base when
+// minting and validating run-scoped projected service-account tokens used by
+// driver/launcher/importer pods. The resulting audience is:
+//
+//	<base>/runs/<runID>
+const TokenAudienceRunPrefix string = "/runs/"
+
+const DefaultMetadataTLSEnabled = false
+
+const DefaultDBCredentialProviderEnabled = false
+
+const (
+	DefaultPipelineRunnerServiceAccount = "pipeline-runner"
+	DefaultBucketNameEnvVar             = "BUCKET_NAME"
+	ProjectIDEnvVar                     = "PROJECT_ID"
 )
 
 const (
-	Owner   Relationship = "Owner"
-	Creator Relationship = "Creator"
+	MaxFileNameLength = 100
+	MaxFileLength     = 32 << 20 // 32Mb
 )
 
-func ToModelResourceType(apiType api.ResourceType) (ResourceType, error) {
-	switch apiType {
-	case api.ResourceType_EXPERIMENT:
-		return Experiment, nil
-	case api.ResourceType_JOB:
-		return Job, nil
-	default:
-		return "", util.NewInvalidInputError("Unsupported resource type: %s", api.ResourceType_name[int32(apiType)])
-	}
-}
+const (
+	CustomCaCertPath = "/kfp/certs/ca.crt"
+	CABundleDir      = "/kfp/certs"
+)
 
-func ToModelRelationship(r api.Relationship) (Relationship, error) {
-	switch r {
-	case api.Relationship_CREATOR:
-		return Creator, nil
-	case api.Relationship_OWNER:
-		return Owner, nil
-	default:
-		return "", util.NewInvalidInputError("Unsupported resource relationship: %s", api.Relationship_name[int32(r)])
-	}
-}
+const (
+	DefaultPodNamespace string = "kubeflow"
+)
+
+const (
+	DefaultMLPipelineServiceName string = "ml-pipeline"
+	DefaultMetadataServiceName   string = "metadata-grpc-service"
+	DefaultClusterDomain         string = "cluster.local"
+)
+
+const (
+	// ClearTagsMetadataKey is the gRPC metadata key set by the HTTP middleware
+	// when the client sends an empty tags map ("tags":{}) to signal that all
+	// tags should be removed. Protobuf binary encoding cannot distinguish an
+	// empty map from nil, so this header preserves the intent across the
+	// HTTP→gRPC proxy roundtrip.
+	ClearTagsMetadataKey              = "x-clear-tags"
+	DefaultPluginMaxKeys              = 16
+	DefaultPluginMaxPayloadBytes      = 64 * 1024
+	DefaultPluginMaxTotalPayloadBytes = 256 * 1024
+	DefaultPluginMaxNestingDepth      = 10
+)

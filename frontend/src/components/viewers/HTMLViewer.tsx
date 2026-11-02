@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,15 +39,11 @@ class HTMLViewer extends Viewer<HTMLViewerProps, any> {
       flexGrow: 1,
       height: this.props.maxDimension ? this.props.maxDimension : 'initial',
       minHeight: this.props.maxDimension ? this.props.maxDimension : 600,
-      width: this.props.maxDimension ? this.props.maxDimension : '100%',
+      width: '100%',
     },
   });
 
-  public getDisplayName(): string {
-    return 'Static HTML';
-  }
-
-  public componentDidMount(): void {
+  private _updateHtmlContent(config: HTMLViewerConfig): void {
     // TODO: iframe.srcdoc doesn't work on Edge yet. It's been added, but not
     // yet rolled out as of the time of writing this (6/14/18):
     // https://developer.microsoft.com/en-us/microsoft-edge/platform/issues/12375527/
@@ -55,17 +51,37 @@ class HTMLViewer extends Viewer<HTMLViewerProps, any> {
     // iframe, while allowing Javascript, but without needing to require
     // "allow-same-origin" sandbox rule.
     if (this._iframeRef.current) {
-      this._iframeRef.current!.srcdoc = this._config.htmlContent;
+      this._iframeRef.current!.srcdoc = config.htmlContent;
     }
   }
 
-  public render(): JSX.Element | null {
+  public getDisplayName(): string {
+    return 'Static HTML';
+  }
+
+  public componentDidMount(): void {
+    this._updateHtmlContent(this._config);
+  }
+
+  public componentDidUpdate(): void {
+    this._config = this.props.configs[0];
+    this._updateHtmlContent(this._config);
+  }
+
+  public render(): React.JSX.Element | null {
     if (!this._config) {
       return null;
     }
 
-    return <iframe ref={this._iframeRef} src='javascript:void(0);'
-      className={this._css.iframe} sandbox='allow-scripts' />;
+    return (
+      // TODO: fix this
+      <iframe
+        ref={this._iframeRef}
+        src='about:blank'
+        className={this._css.iframe}
+        sandbox='allow-scripts'
+      />
+    );
   }
 }
 

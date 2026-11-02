@@ -1,4 +1,6 @@
-# Copyright 2018 Google LLC
+"""The `kfp.components` module contains functions for loading components from
+compiled YAML."""
+# Copyright 2021 The Kubeflow Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +14,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ._components import *
-from ._python_op import *
-from ._component_store import *
+__all__ = [
+    'load_component_from_file',
+    'load_component_from_url',
+    'load_component_from_text',
+    'PythonComponent',
+    'BaseComponent',
+    'ContainerComponent',
+    'YamlComponent',
+]
+
+from kfp.components.load_yaml_utilities import (
+    load_component_from_file,
+    load_component_from_text,
+    load_component_from_url,
+)
+
+# Public aliases for the DSL component and placeholder modules.
+from kfp.dsl import base_component, placeholders
+from kfp.dsl.base_component import BaseComponent
+from kfp.dsl.container_component_class import ContainerComponent
+from kfp.dsl.python_component import PythonComponent
+from kfp.dsl.yaml_component import YamlComponent

@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,29 +14,45 @@
  * limitations under the License.
  */
 
-import { Apis } from '../lib/Apis';
+import { MockInstance } from 'vitest';
 import { ConfusionMatrixConfig } from '../components/viewers/ConfusionMatrix';
-import { PlotType } from '../components/viewers/Viewer';
-import { StoragePath, StorageService } from './WorkflowParser';
-import { OutputArtifactLoader } from './OutputArtifactLoader';
-import { PagedTableConfig } from '../components/viewers/PagedTable';
-import { TensorboardViewerConfig } from '../components/viewers/Tensorboard';
 import { HTMLViewerConfig } from '../components/viewers/HTMLViewer';
+import { MarkdownViewerConfig } from '../components/viewers/MarkdownViewer';
+import { PagedTableConfig } from '../components/viewers/PagedTable';
 import { ROCCurveConfig } from '../components/viewers/ROCCurve';
+import { TensorboardViewerConfig } from '../components/viewers/Tensorboard';
+import { PlotType } from '../components/viewers/Viewer';
+import { Apis } from '../lib/Apis';
+import { OutputArtifactLoader, TEST_ONLY } from './OutputArtifactLoader';
+import { StoragePath, StorageService } from './StoragePath';
+
+beforeEach(async () => {
+  vi.resetAllMocks();
+});
 
 describe('OutputArtifactLoader', () => {
   const storagePath: StoragePath = { bucket: 'b', key: 'k', source: StorageService.GCS };
-  const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => null);
+  const consoleSpy = vi.spyOn(console, 'error');
   let fileToRead: string;
-  jest.spyOn(Apis, 'readFile').mockImplementation(() => fileToRead);
+  const readFileSpy = vi.spyOn(Apis, 'readFile');
+  let getSourceContent: MockInstance;
+  beforeEach(() => {
+    consoleSpy.mockImplementation(() => null);
+    readFileSpy.mockImplementation(() => Promise.resolve(fileToRead));
+    // Mocked in tests, because we test namespace separately.
+    getSourceContent = vi.fn(async (source, storage) =>
+      TEST_ONLY.readSourceContent(source, storage, /* namespace */ undefined),
+    );
+  });
 
   describe('loadOutputArtifacts', () => {
     it('handles bad API call', async () => {
-      jest.spyOn(Apis, 'readFile').mockImplementation(() => { throw new Error('bad call'); });
+      readFileSpy.mockImplementation(() => {
+        throw new Error('bad call');
+      });
       expect(await OutputArtifactLoader.load(storagePath)).toEqual([]);
       expect(consoleSpy).toHaveBeenCalled();
-
-      jest.spyOn(Apis, 'readFile').mockImplementation(() => fileToRead);
+      readFileSpy.mockImplementation(() => fileToRead);
     });
 
     it('handles an empty file', async () => {
@@ -65,43 +81,130 @@ describe('OutputArtifactLoader', () => {
     it('handles json with empty "outputs" array', async () => {
       fileToRead = '{"outputs": []}';
       expect(await OutputArtifactLoader.load(storagePath)).toEqual([]);
-      expect(consoleSpy).toHaveBeenCalled();
+      expect(consoleSpy).not.toHaveBeenCalled();
+    });
+
+    it('passes namespace to readFile api call', async () => {
+      const metadata = { type: 'markdown', source: 'gs://bucket/object/key', storage: 'gcs' };
+      fileToRead = JSON.stringify({ outputs: [metadata] });
+      await OutputArtifactLoader.load(storagePath, 'ns1');
+      expect(readFileSpy).toHaveBeenCalledTimes(2);
+      expect(readFileSpy.mock.calls.map(([{ path, namespace }]) => namespace))
+        .toMatchInlineSnapshot(`
+        [
+          "ns1",
+          "ns1",
+        ]
+      `);
+    });
+
+    it('uses artifact provider info for metadata and resolves referenced sources independently', async () => {
+      const metadata = { type: 'markdown', source: 's3://bucket/object/key', storage: 'gcs' };
+      fileToRead = JSON.stringify({ outputs: [metadata] });
+
+      await OutputArtifactLoader.load(storagePath, 'ns1', { providerInfo: 'provider-session' });
+
+      expect(readFileSpy).toHaveBeenCalledTimes(2);
+      expect(readFileSpy.mock.calls.map(([{ providerInfo }]) => providerInfo)).toEqual([
+        'provider-session',
+        undefined,
+      ]);
+    });
+
+    it('can surface loading failures to a query boundary', async () => {
+      readFileSpy.mockRejectedValue(new Error('metadata unavailable'));
+
+      await expect(
+        OutputArtifactLoader.load(storagePath, 'ns1', { throwOnError: true }),
+      ).rejects.toThrow('metadata unavailable');
+    });
+
+    it('keeps valid viewer configs when a sibling source fails', async () => {
+      const metadata = JSON.stringify({
+        outputs: [
+          { type: PlotType.MARKDOWN, source: 'gs://bucket/valid.md', storage: 'gcs' },
+          { type: PlotType.MARKDOWN, source: 'gs://bucket/missing.md', storage: 'gcs' },
+        ],
+      });
+      readFileSpy.mockImplementation(async ({ path }) => {
+        if (path.key === 'k') {
+          return metadata;
+        }
+        if (path.key === 'valid.md') {
+          return '# valid';
+        }
+        throw new Error('missing source');
+      });
+
+      await expect(OutputArtifactLoader.loadResult(storagePath)).resolves.toEqual({
+        configKeys: ['metadata-0'],
+        configs: [{ markdownContent: '# valid', type: PlotType.MARKDOWN }],
+        errors: ['missing source'],
+      });
+      await expect(
+        OutputArtifactLoader.load(storagePath, undefined, { throwOnError: true }),
+      ).resolves.toEqual([{ markdownContent: '# valid', type: PlotType.MARKDOWN }]);
+    });
+
+    it('surfaces referenced-source failures when a legacy caller requests errors', async () => {
+      fileToRead = JSON.stringify({
+        outputs: [{ type: PlotType.MARKDOWN, source: 'gs://bucket/missing.md', storage: 'gcs' }],
+      });
+      readFileSpy.mockImplementation(async ({ path }) => {
+        if (path.key === 'k') {
+          return fileToRead;
+        }
+        throw new Error('missing source');
+      });
+
+      await expect(
+        OutputArtifactLoader.load(storagePath, undefined, { throwOnError: true }),
+      ).rejects.toThrow('missing source');
     });
   });
 
   describe('buildConfusionMatrixConfig', () => {
     it('requires "source" metadata field', async () => {
       const metadata = { schema: 'schema', format: 'format' };
-      expect(OutputArtifactLoader.buildConfusionMatrixConfig(metadata as any)).rejects.toThrowError(
-        'Malformed metadata, property "source" is required.');
+      await expect(
+        OutputArtifactLoader.buildConfusionMatrixConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Malformed metadata, property "source" is required.');
     });
 
-    it('requires "labels" metadata field', () => {
+    it('requires "labels" metadata field', async () => {
       const metadata = { source: 'source', schema: 'schema' };
-      expect(OutputArtifactLoader.buildConfusionMatrixConfig(metadata as any)).rejects.toThrowError(
-        'Malformed metadata, property "labels" is required.');
+      await expect(
+        OutputArtifactLoader.buildConfusionMatrixConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Malformed metadata, property "labels" is required.');
     });
 
-    it('requires "schema" metadata field', () => {
+    it('requires "schema" metadata field', async () => {
       const metadata = { source: 'source', labels: 'labels' };
-      expect(OutputArtifactLoader.buildConfusionMatrixConfig(metadata as any)).rejects.toThrowError(
-        'Malformed metadata, property "schema" missing.');
+      await expect(
+        OutputArtifactLoader.buildConfusionMatrixConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Malformed metadata, property "schema" missing.');
     });
 
-    it('handles empty schema', () => {
+    it('handles empty schema', async () => {
       const metadata = { source: 'gs://source', labels: ['labels'], schema: 'schema' };
-      expect(OutputArtifactLoader.buildConfusionMatrixConfig(metadata as any)).rejects.toThrowError(
-        '"schema" must be an array of {"name": string, "type": string} objects');
+      await expect(
+        OutputArtifactLoader.buildConfusionMatrixConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError(
+        '"schema" must be an array of {"name": string, "type": string} objects',
+      );
     });
 
-    it('handles schema with bad field format', () => {
+    it('handles schema with bad field format', async () => {
       const metadata = {
         labels: ['field1', 'field2'],
-        schema: [{
-          name: 'field1',
-        }, {
-          type: 'field2 type',
-        }],
+        schema: [
+          {
+            name: 'field1',
+          },
+          {
+            type: 'field2 type',
+          },
+        ],
         source: 'gs://source',
       };
       fileToRead = `
@@ -110,91 +213,145 @@ describe('OutputArtifactLoader', () => {
       field2,field1,0
       field2,field2,0
       `;
-      expect(OutputArtifactLoader.buildConfusionMatrixConfig(metadata as any)).rejects.toThrowError(
-        'Each item in the "schema" array must contain a "name" field');
+      await expect(
+        OutputArtifactLoader.buildConfusionMatrixConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Each item in the "schema" array must contain a "name" field');
     });
 
-    it('handles when too many labels are specified for the data', () => {
+    it('handles when too many labels are specified for the data', async () => {
       const metadata = {
         labels: ['labels', 'labels'],
-        schema: [{
-          name: 'field1',
-        }, {
-          name: 'field2',
-          type: 'field2 type',
-        }],
+        schema: [
+          {
+            name: 'field1',
+          },
+          {
+            name: 'field2',
+            type: 'field2 type',
+          },
+        ],
         source: 'gs://path',
       };
       fileToRead = '';
-      expect(OutputArtifactLoader.buildConfusionMatrixConfig(metadata as any)).rejects.toThrowError(
-        'Data dimensions 0 do not match the number of labels passed 2');
+      await expect(
+        OutputArtifactLoader.buildConfusionMatrixConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Data dimensions 0 do not match the number of labels passed 2');
     });
 
-    it('returns a confusion matrix config with basic metadata', async () => {
-      const metadata = {
-        labels: ['field1', 'field2'],
-        schema: [{
+    const basicMetadata = {
+      labels: ['field1', 'field2'],
+      schema: [
+        {
           name: 'field1',
-        }, {
+        },
+        {
           name: 'field2',
           type: 'field2 type',
-        }],
-        source: 'gs://path',
-      };
+        },
+      ],
+      source: 'gs://path',
+    };
+    it('returns a confusion matrix config with basic metadata', async () => {
       fileToRead = `
       field1,field1,0
       field1,field2,0
       field2,field1,0
       field2,field2,0
       `;
-      const result = await OutputArtifactLoader.buildConfusionMatrixConfig(metadata as any);
+      const result = await OutputArtifactLoader.buildConfusionMatrixConfig(
+        basicMetadata as any,
+        getSourceContent,
+      );
       expect(result).toEqual({
         axes: ['field1', 'field2'],
-        data: [[0, 0], [0, 0]],
+        data: [
+          [0, 0],
+          [0, 0],
+        ],
         labels: ['field1', 'field2'],
         type: PlotType.CONFUSION_MATRIX,
       } as ConfusionMatrixConfig);
     });
+    it('supports inline confusion matrix data', async () => {
+      fileToRead = '';
+
+      const source = `
+      label1,label1,1
+      label1,label2,2
+      label2,label1,3
+      label2,label2,4
+      `;
+      const expectedResult: ConfusionMatrixConfig = {
+        axes: ['field1', 'field2'],
+        data: [
+          // Note, the data matrix's layout does not match how we show it in UI.
+          // field1 is x-axis, field2 is y-axis
+          [1 /* field1=label1, field2=label1 */, 2 /* field1=label1, field2=label2 */],
+          [3 /* field1=label2, field2=label1 */, 4 /* field1=label2, field2=label2 */],
+        ],
+        labels: ['label1', 'label2'],
+        type: PlotType.CONFUSION_MATRIX,
+      };
+
+      const result = await OutputArtifactLoader.buildConfusionMatrixConfig(
+        {
+          ...basicMetadata,
+          labels: ['label1', 'label2'],
+          storage: 'inline',
+          source,
+        } as any,
+        getSourceContent,
+      );
+      expect(result).toEqual(expectedResult);
+    });
   });
 
   describe('buildPagedTableConfig', () => {
-    it('requires "source" metadata field', () => {
+    it('requires "source" metadata field', async () => {
       const metadata = { header: 'header', format: 'format' };
-      expect(OutputArtifactLoader.buildPagedTableConfig(metadata as any)).rejects.toThrowError(
-        'Malformed metadata, property "source" is required.');
+      await expect(
+        OutputArtifactLoader.buildPagedTableConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Malformed metadata, property "source" is required.');
     });
 
-    it('requires "header" metadata field', () => {
+    it('requires "header" metadata field', async () => {
       const metadata = { source: 'source', format: 'format' };
-      expect(OutputArtifactLoader.buildPagedTableConfig(metadata as any)).rejects.toThrowError(
-        'Malformed metadata, property "header" is required.');
+      await expect(
+        OutputArtifactLoader.buildPagedTableConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Malformed metadata, property "header" is required.');
     });
 
-    it('requires "format" metadata field', () => {
+    it('requires "format" metadata field', async () => {
       const metadata = { source: 'source', header: 'header' };
-      expect(OutputArtifactLoader.buildPagedTableConfig(metadata as any)).rejects.toThrowError(
-        'Malformed metadata, property "format" is required.');
+      await expect(
+        OutputArtifactLoader.buildPagedTableConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Malformed metadata, property "format" is required.');
     });
 
-    it('requires only supports csv format', () => {
-      const metadata = { source: 'source', header: 'header', format: 'json' };
-      expect(OutputArtifactLoader.buildPagedTableConfig(metadata as any)).rejects.toThrowError(
-        'Unsupported table format: json');
+    it('requires only supports csv format', async () => {
+      const metadata = { source: 'http://source', header: 'header', format: 'json' };
+      await expect(
+        OutputArtifactLoader.buildPagedTableConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Unsupported table format: json');
     });
+
+    const basicMetadata = {
+      format: 'csv',
+      header: ['field1', 'field2'],
+      source: 'gs://path',
+    };
 
     it('returns a paged table config with basic metadata', async () => {
-      const metadata = {
-        format: 'csv',
-        header: ['field1', 'field2'],
-        source: 'gs://path',
-      };
       fileToRead = `
       field1,field1,0
       field1,field2,0
       field2,field1,0
       field2,field2,0
       `;
-      const result = await OutputArtifactLoader.buildPagedTableConfig(metadata as any);
+      const result = await OutputArtifactLoader.buildPagedTableConfig(
+        basicMetadata as any,
+        getSourceContent,
+      );
       expect(result).toEqual({
         data: [
           ['field1', 'field1', '0'],
@@ -206,29 +363,66 @@ describe('OutputArtifactLoader', () => {
         type: PlotType.TABLE,
       } as PagedTableConfig);
     });
+
+    it('returns a paged table config with inline metadata', async () => {
+      fileToRead = '';
+      const source = `
+      field1,field1,1
+      field1,field2,2
+      field2,field1,3
+      field2,field2,4
+      `;
+      const metadata = { ...basicMetadata, storage: 'inline', source };
+      const result = await OutputArtifactLoader.buildPagedTableConfig(
+        metadata as any,
+        getSourceContent,
+      );
+      const expectedResult: PagedTableConfig = {
+        data: [
+          ['field1', 'field1', '1'],
+          ['field1', 'field2', '2'],
+          ['field2', 'field1', '3'],
+          ['field2', 'field2', '4'],
+        ],
+        labels: ['field1', 'field2'],
+        type: PlotType.TABLE,
+      };
+      expect(result).toEqual(expectedResult);
+    });
   });
 
   describe('buildTensorboardConfig', () => {
-    it('requires "source" metadata field', () => {
+    it('requires "source" metadata field', async () => {
       const metadata = { header: 'header', format: 'format' };
-      expect(OutputArtifactLoader.buildTensorboardConfig(metadata as any)).rejects.toThrowError(
-        'Malformed metadata, property "source" is required.');
+      await expect(
+        OutputArtifactLoader.buildTensorboardConfig(metadata as any, 'test-ns'),
+      ).rejects.toThrowError('Malformed metadata, property "source" is required.');
+    });
+
+    it('allows the server to resolve a missing standalone namespace', async () => {
+      expect(
+        await OutputArtifactLoader.buildTensorboardConfig({ source: 'gs://path' }),
+      ).toMatchObject({ namespace: '', type: PlotType.TENSORBOARD, url: 'gs://path' });
     });
 
     it('returns a tensorboard config with basic metadata', async () => {
       const metadata = { source: 'gs://path' };
-      expect(await OutputArtifactLoader.buildTensorboardConfig(metadata as any)).toEqual({
-        type: PlotType.TENSORBOARD,
-        url: 'gs://path',
-      } as TensorboardViewerConfig);
+      expect(await OutputArtifactLoader.buildTensorboardConfig(metadata as any, 'test-ns')).toEqual(
+        {
+          namespace: 'test-ns',
+          type: PlotType.TENSORBOARD,
+          url: 'gs://path',
+        } as TensorboardViewerConfig,
+      );
     });
   });
 
   describe('buildHtmlViewerConfig', () => {
-    it('requires "source" metadata field', () => {
+    it('requires "source" metadata field', async () => {
       const metadata = { header: 'header', format: 'format' };
-      expect(OutputArtifactLoader.buildHtmlViewerConfig(metadata as any)).rejects.toThrowError(
-        'Malformed metadata, property "source" is required.');
+      await expect(
+        OutputArtifactLoader.buildHtmlViewerConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Malformed metadata, property "source" is required.');
     });
 
     it('returns an HTML viewer config with basic metadata', async () => {
@@ -236,74 +430,147 @@ describe('OutputArtifactLoader', () => {
       fileToRead = `<html><body>
         Hello World!
       </body></html>`;
-      expect(await OutputArtifactLoader.buildHtmlViewerConfig(metadata as any)).toEqual({
+      expect(
+        await OutputArtifactLoader.buildHtmlViewerConfig(metadata as any, getSourceContent),
+      ).toEqual({
         htmlContent: fileToRead,
+        type: PlotType.WEB_APP,
+      } as HTMLViewerConfig);
+    });
+
+    it('returns source as html content when storage type is inline', async () => {
+      const metadata = {
+        source: `<html><body>
+        Hello World!
+      </body></html>`,
+        storage: 'inline',
+      };
+      expect(
+        await OutputArtifactLoader.buildHtmlViewerConfig(metadata as any, getSourceContent),
+      ).toEqual({
+        htmlContent: metadata.source,
         type: PlotType.WEB_APP,
       } as HTMLViewerConfig);
     });
   });
 
+  describe('buildMarkdownViewerConfig', () => {
+    it('requires "source" metadata field', async () => {
+      const metadata = { header: 'header', format: 'format' };
+      await expect(
+        OutputArtifactLoader.buildMarkdownViewerConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Malformed metadata, property "source" is required.');
+    });
+
+    it('returns a markdown viewer config with basic metadata for inline markdown', async () => {
+      const metadata = { source: '# some markdown here', storage: 'inline' };
+      expect(
+        await OutputArtifactLoader.buildMarkdownViewerConfig(metadata as any, getSourceContent),
+      ).toEqual({
+        markdownContent: '# some markdown here',
+        type: PlotType.MARKDOWN,
+      } as MarkdownViewerConfig);
+    });
+
+    it('returns a markdown viewer config with basic metadata for gcs path markdown', async () => {
+      const metadata = { source: 'gs://path', storage: 'gcs' };
+      fileToRead = `<html><body>
+        Hello World!
+      </body></html>`;
+      expect(
+        await OutputArtifactLoader.buildMarkdownViewerConfig(metadata as any, getSourceContent),
+      ).toEqual({
+        markdownContent: fileToRead,
+        type: PlotType.MARKDOWN,
+      } as MarkdownViewerConfig);
+    });
+
+    it('assumes remote path by default, and returns a markdown viewer config with basic metadata', async () => {
+      const metadata = { source: 'gs://path' };
+      fileToRead = `<html><body>
+        Hello World!
+      </body></html>`;
+      expect(
+        await OutputArtifactLoader.buildMarkdownViewerConfig(metadata as any, getSourceContent),
+      ).toEqual({
+        markdownContent: fileToRead,
+        type: PlotType.MARKDOWN,
+      } as MarkdownViewerConfig);
+    });
+  });
+
   describe('buildRocCurveConfig', () => {
-    it('requires "source" metadata field', () => {
+    it('requires "source" metadata field', async () => {
       const metadata = { header: 'header', schema: 'schema' };
-      expect(OutputArtifactLoader.buildRocCurveConfig(metadata as any)).rejects.toThrowError(
-        'Malformed metadata, property "source" is required.');
+      await expect(
+        OutputArtifactLoader.buildRocCurveConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Malformed metadata, property "source" is required.');
     });
 
-    it('requires "schema" metadata field', () => {
+    it('requires "schema" metadata field', async () => {
       const metadata = { source: 'header' };
-      expect(OutputArtifactLoader.buildRocCurveConfig(metadata as any)).rejects.toThrowError(
-        'Malformed metadata, property "schema" is required.');
+      await expect(
+        OutputArtifactLoader.buildRocCurveConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Malformed metadata, property "schema" is required.');
     });
 
-    it('throws for a non-array schema', () => {
+    it('throws for a non-array schema', async () => {
       const metadata = { source: 'gs://path', schema: { field1: 'string' } };
-      expect(OutputArtifactLoader.buildRocCurveConfig(metadata as any)).rejects.toThrowError(
-        'Malformed schema, must be an array of {"name": string, "type": string}');
+      await expect(
+        OutputArtifactLoader.buildRocCurveConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError(
+        'Malformed schema, must be an array of {"name": string, "type": string}',
+      );
     });
 
-    it('requires "fpr" field in the schema', () => {
+    it('requires "fpr" field in the schema', async () => {
       const metadata = { source: 'gs://path', schema: [{ name: 'field1', type: 'string' }] };
-      expect(OutputArtifactLoader.buildRocCurveConfig(metadata as any)).rejects.toThrowError(
-        'Malformed schema, expected to find a column named "fpr"');
+      await expect(
+        OutputArtifactLoader.buildRocCurveConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Malformed schema, expected to find a column named "fpr"');
     });
 
-    it('requires "tpr" field in the schema', () => {
+    it('requires "tpr" field in the schema', async () => {
       const metadata = { source: 'gs://path', schema: [{ name: 'fpr', type: 'string' }] };
-      expect(OutputArtifactLoader.buildRocCurveConfig(metadata as any)).rejects.toThrowError(
-        'Malformed schema, expected to find a column named "tpr"');
+      await expect(
+        OutputArtifactLoader.buildRocCurveConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Malformed schema, expected to find a column named "tpr"');
     });
 
-    it('requires "threshold" field in the schema', () => {
-      const metadata = {
-        schema: [{
-          name: 'fpr',
-          type: 'string',
-        }, {
-          name: 'tpr',
-          type: 'string',
-        }],
-        source: 'gs://path',
-      };
-      expect(OutputArtifactLoader.buildRocCurveConfig(metadata as any)).rejects.toThrowError(
-        'Malformed schema, expected to find a column named "threshold"');
-    });
-
-    it('returns an ROC viewer config with basic metadata', async () => {
+    it('requires "threshold" field in the schema', async () => {
       const metadata = {
         schema: [
-          { name: 'fpr' },
-          { name: 'tpr' },
-          { name: 'threshold' }
+          {
+            name: 'fpr',
+            type: 'string',
+          },
+          {
+            name: 'tpr',
+            type: 'string',
+          },
         ],
         source: 'gs://path',
       };
+      await expect(
+        OutputArtifactLoader.buildRocCurveConfig(metadata as any, getSourceContent),
+      ).rejects.toThrowError('Malformed schema, expected to find a column named "threshold"');
+    });
+
+    const basicMetadata = {
+      schema: [{ name: 'fpr' }, { name: 'tpr' }, { name: 'threshold' }],
+      source: 'gs://path',
+    };
+
+    it('returns an ROC viewer config with basic metadata', async () => {
+      const metadata = basicMetadata;
       fileToRead = `
         0,1,2
         3,4,5
         6,7,8
       `;
-      expect(await OutputArtifactLoader.buildRocCurveConfig(metadata as any)).toEqual({
+      expect(
+        await OutputArtifactLoader.buildRocCurveConfig(metadata as any, getSourceContent),
+      ).toEqual({
         data: [
           { label: '2', x: 0, y: 1 },
           { label: '5', x: 3, y: 4 },
@@ -313,13 +580,30 @@ describe('OutputArtifactLoader', () => {
       } as ROCCurveConfig);
     });
 
+    it('returns an ROC viewer config with basic metadata', async () => {
+      const source = `
+        9,1,2
+        3,4,5
+        6,7,8
+      `;
+      const metadata = { ...basicMetadata, source, storage: 'inline' };
+      fileToRead = '';
+      const expectedResult: ROCCurveConfig = {
+        data: [
+          { label: '2', x: 9, y: 1 },
+          { label: '5', x: 3, y: 4 },
+          { label: '8', x: 6, y: 7 },
+        ],
+        type: PlotType.ROC,
+      };
+      expect(
+        await OutputArtifactLoader.buildRocCurveConfig(metadata as any, getSourceContent),
+      ).toEqual(expectedResult);
+    });
+
     it('returns an ROC viewer config with fields out of order', async () => {
       const metadata = {
-        schema: [
-          { name: 'threshold' },
-          { name: 'tpr' },
-          { name: 'fpr' },
-        ],
+        schema: [{ name: 'threshold' }, { name: 'tpr' }, { name: 'fpr' }],
         source: 'gs://path',
       };
       fileToRead = `
@@ -327,7 +611,9 @@ describe('OutputArtifactLoader', () => {
         3,4,5
         6,7,8
       `;
-      expect(await OutputArtifactLoader.buildRocCurveConfig(metadata as any)).toEqual({
+      expect(
+        await OutputArtifactLoader.buildRocCurveConfig(metadata as any, getSourceContent),
+      ).toEqual({
         data: [
           { label: '0', x: 2, y: 1 },
           { label: '3', x: 5, y: 4 },
@@ -339,11 +625,7 @@ describe('OutputArtifactLoader', () => {
 
     it('returns an ROC viewer config with "thresholds" column instead of "threshold', async () => {
       const metadata = {
-        schema: [
-          { name: 'fpr' },
-          { name: 'tpr' },
-          { name: 'thresholds' }
-        ],
+        schema: [{ name: 'fpr' }, { name: 'tpr' }, { name: 'thresholds' }],
         source: 'gs://path',
       };
       fileToRead = `
@@ -351,7 +633,9 @@ describe('OutputArtifactLoader', () => {
         3,4,5
         6,7,8
       `;
-      expect(await OutputArtifactLoader.buildRocCurveConfig(metadata as any)).toEqual({
+      expect(
+        await OutputArtifactLoader.buildRocCurveConfig(metadata as any, getSourceContent),
+      ).toEqual({
         data: [
           { label: '2', x: 0, y: 1 },
           { label: '5', x: 3, y: 4 },
@@ -360,6 +644,5 @@ describe('OutputArtifactLoader', () => {
         type: PlotType.ROC,
       } as ROCCurveConfig);
     });
-
   });
 });

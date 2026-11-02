@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,91 +19,194 @@ import (
 	"fmt"
 
 	sq "github.com/Masterminds/squirrel"
+	"github.com/golang/glog"
 	"github.com/kubeflow/pipelines/backend/src/apiserver/common"
+	"github.com/kubeflow/pipelines/backend/src/apiserver/common/sql/dialect"
+	"github.com/kubeflow/pipelines/backend/src/apiserver/filter"
 	"github.com/kubeflow/pipelines/backend/src/apiserver/list"
 	"github.com/kubeflow/pipelines/backend/src/apiserver/model"
 	"github.com/kubeflow/pipelines/backend/src/common/util"
 )
 
+var jobColumns = []string{
+	"UUID",
+	"DisplayName",
+	"Name",
+	"Namespace",
+	"ServiceAccount",
+	"Description",
+	"MaxConcurrency",
+	"NoCatchup",
+	"CreatedAtInSec",
+	"UpdatedAtInSec",
+	"Enabled",
+	"CronScheduleStartTimeInSec",
+	"CronScheduleEndTimeInSec",
+	"Schedule",
+	"PeriodicScheduleStartTimeInSec",
+	"PeriodicScheduleEndTimeInSec",
+	"IntervalSecond",
+	"PipelineId",
+	"PipelineName",
+	"PipelineSpecManifest",
+	"WorkflowSpecManifest",
+	"Parameters",
+	"Conditions",
+	"RuntimeParameters",
+	"PipelineRoot",
+	"ExperimentUUID",
+	"PipelineVersionId",
+	"PluginsInput",
+}
+
 type JobStoreInterface interface {
-	ListJobs(filterContext *common.FilterContext, opts *list.Options) ([]*model.Job, string, error)
-	GetJob(id string) (*model.Job, error)
+	// Create a recurring run entry in the database.
 	CreateJob(*model.Job) (*model.Job, error)
-	DeleteJob(id string) error
-	EnableJob(id string, enabled bool) error
+
+	// Fetches a recurring run with a given id from the database.
+	GetJob(id string) (*model.Job, error)
+
+	// Fetches recurring runs from the database with the specified filtering and listing options.
+	ListJobs(filterContext *model.FilterContext, opts *list.Options) ([]*model.Job, int, string, error)
+
+	// Enable or disables a recurring run in the database.
+	ChangeJobMode(id string, enabled bool) error
+
+	// Update a recurring run entry in the database.
 	UpdateJob(swf *util.ScheduledWorkflow) error
+
+	// Update observed status without accepting changes to the authorized recurring run specification.
+	UpdateJobStatus(swf *util.ScheduledWorkflow) error
+
+	// GetRecurringRunState fetches API-owned scheduling progress.
+	GetRecurringRunState(jobID string) (*model.RecurringRunState, error)
+
+	// ClaimRecurringRun atomically reserves the next scheduled execution.
+	ClaimRecurringRun(jobID, requestKey string, expectedIndex, scheduledAt, createdAt int64, pipelineVersionID string) (*model.RecurringRunState, error)
+
+	// Removes a recurring run entry from the database.
+	DeleteJob(id string) error
 }
 
 type JobStore struct {
-	db                     *DB
+	db                     *sql.DB
 	resourceReferenceStore *ResourceReferenceStore
 	time                   util.TimeInterface
+	dbDialect              dialect.DBDialect
 }
 
+// Runs two SQL queries in a transaction to return a list of matching jobs, as well as their
+// total_size. The total_size does not reflect the page size, but it does reflect the number of jobs
+// matching the supplied filters and resource references.
 func (s *JobStore) ListJobs(
-	filterContext *common.FilterContext, opts *list.Options) ([]*model.Job, string, error) {
-	errorF := func(err error) ([]*model.Job, string, error) {
-		return nil, "", util.NewInternalServerError(err, "Failed to list jobs: %v", err)
+	filterContext *model.FilterContext, opts *list.Options,
+) ([]*model.Job, int, string, error) {
+	errorF := func(err error) ([]*model.Job, int, string, error) {
+		return nil, 0, "", util.NewInternalServerError(err, "Failed to list jobs: %v", err)
 	}
 
-	// Add filter condition
-	filteredSelectBuilder, err := s.toFilteredQuery(filterContext)
+	rowsSql, rowsArgs, err := s.buildSelectJobsQuery(false, opts, filterContext)
 	if err != nil {
 		return errorF(err)
 	}
-
-	sqlBuilder := s.selectJob(filteredSelectBuilder)
+	sizeSql, sizeArgs, err := s.buildSelectJobsQuery(true, opts, filterContext)
 	if err != nil {
 		return errorF(err)
 	}
-
-	sql, args, err := opts.AddToSelect(sqlBuilder).ToSql()
+	// Use a transaction to make sure we're returning the total_size of the same rows queried
+	tx, err := s.db.Begin()
 	if err != nil {
+		glog.Errorf("Failed to start transaction to list jobs")
 		return errorF(err)
 	}
+	defer tx.Rollback()
 
-	rows, err := s.db.Query(sql, args...)
+	rows, err := tx.Query(rowsSql, rowsArgs...)
 	if err != nil {
 		return errorF(err)
 	}
 	defer rows.Close()
-
+	if err := rows.Err(); err != nil {
+		return errorF(err)
+	}
 	jobs, err := s.scanRows(rows)
 	if err != nil {
+		tx.Rollback()
+		return errorF(err)
+	}
+
+	sizeRow, err := tx.Query(sizeSql, sizeArgs...)
+	if err != nil {
+		tx.Rollback()
+		return errorF(err)
+	}
+	defer sizeRow.Close()
+	if err := sizeRow.Err(); err != nil {
+		tx.Rollback()
+		return errorF(err)
+	}
+	totalSize, err := list.ScanRowToTotalSize(sizeRow)
+	if err != nil {
+		tx.Rollback()
+		return errorF(err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		glog.Errorf("Failed to commit transaction to list jobs")
 		return errorF(err)
 	}
 
 	if len(jobs) <= opts.PageSize {
-		return jobs, "", nil
+		return jobs, totalSize, "", nil
 	}
 
 	npt, err := opts.NextPageToken(jobs[opts.PageSize])
-	return jobs[:opts.PageSize], npt, err
+	return jobs[:opts.PageSize], totalSize, npt, err
 }
 
-func (s *JobStore) toFilteredQuery(filterContext *common.FilterContext) (sq.SelectBuilder, error) {
-	selectBuilder := sq.Select("*").From("jobs")
-	if filterContext.ReferenceKey != nil {
-		resourceReferenceFilter, args, err := sq.Select("ResourceUUID").
-			From("resource_references as rf").
-			Where(sq.And{
-				sq.Eq{"rf.ResourceType": common.Job},
-				sq.Eq{"rf.ReferenceUUID": filterContext.ID},
-				sq.Eq{"rf.ReferenceType": filterContext.Type}}).ToSql()
-		if err != nil {
-			return selectBuilder, util.NewInternalServerError(
-				err, "Failed to create subquery to filter by resource reference: %v", err.Error())
-		}
-		return selectBuilder.Where(fmt.Sprintf("UUID in (%s)", resourceReferenceFilter), args...), nil
+func (s *JobStore) buildSelectJobsQuery(selectCount bool, opts *list.Options,
+	filterContext *model.FilterContext,
+) (string, []interface{}, error) {
+	var filteredSelectBuilder sq.SelectBuilder
+	var err error
+
+	refKey := filterContext.ReferenceKey
+	q := s.dbDialect.QuoteIdentifier
+	qb := s.dbDialect.QueryBuilder()
+
+	if refKey != nil && refKey.Type == model.ExperimentResourceType && (refKey.ID != "" || common.IsMultiUserMode()) {
+		filteredSelectBuilder, err = FilterByExperiment(qb, q, "jobs", jobColumns, selectCount, refKey.ID)
+	} else if refKey != nil && refKey.Type == model.NamespaceResourceType && (refKey.ID != "" || common.IsMultiUserMode()) {
+		filteredSelectBuilder, err = FilterByNamespace(qb, q, "jobs", jobColumns, selectCount, refKey.ID)
+	} else {
+		filteredSelectBuilder, err = FilterByResourceReference(qb, q, "jobs", jobColumns, model.JobResourceType, selectCount, filterContext)
 	}
-	return selectBuilder, nil
+	if err != nil {
+		return "", nil, util.NewInternalServerError(err, "Failed to list jobs: %v", err)
+	}
+	sqlBuilder := opts.AddFilterToSelect(filteredSelectBuilder, q)
+
+	// If we're not just counting, then also add select columns and perform a left join
+	// to get resource reference information. Also add pagination.
+	if !selectCount {
+		sqlBuilder = s.addResourceReferences(sqlBuilder)
+		sqlBuilder = opts.AddPaginationToSelect(sqlBuilder, q, s.dbDialect.StringCollation())
+	}
+	sql, args, err := s.dbDialect.FinalizeSelect(sqlBuilder)
+	if err != nil {
+		return "", nil, util.NewInternalServerError(err, "Failed to list jobs: %v", err)
+	}
+	return sql, args, err
 }
 
 func (s *JobStore) GetJob(id string) (*model.Job, error) {
-	sql, args, err := s.selectJob(sq.Select("*").From("jobs")).
-		Where(sq.Eq{"uuid": id}).
-		Limit(1).
-		ToSql()
+	q := s.dbDialect.QuoteIdentifier
+	qb := s.dbDialect.QueryBuilder()
+	getJobBuilder := s.addResourceReferences(
+		qb.Select(dialect.QuoteAll(q, jobColumns)...).From(q("jobs")),
+	).Where(sq.Eq{q("UUID"): id}).Limit(1)
+	sql, args, err := s.dbDialect.FinalizeSelect(getJobBuilder)
 	if err != nil {
 		return nil, util.NewInternalServerError(err, "Failed to create query to get job: %v",
 			err.Error())
@@ -124,46 +227,83 @@ func (s *JobStore) GetJob(id string) (*model.Job, error) {
 	return jobs[0], nil
 }
 
-func (s *JobStore) selectJob(filteredSelectBuilder sq.SelectBuilder) sq.SelectBuilder {
-	resourceRefConcatQuery := s.db.Concat([]string{`"["`, s.db.GroupConcat("r.Payload", ","), `"]"`}, "")
-	return sq.
-		Select("jobs.*", resourceRefConcatQuery+" AS refs").
-		FromSelect(filteredSelectBuilder, "jobs").
-		// Append all the resource references for the run as a json column
-		LeftJoin("(select * from resource_references where ResourceType='Job') AS r ON jobs.UUID=r.ResourceUUID").
-		GroupBy("jobs.UUID")
+func (s *JobStore) addResourceReferences(filteredSelectBuilder sq.SelectBuilder) sq.SelectBuilder {
+	q := s.dbDialect.QuoteIdentifier
+	qb := sq.StatementBuilder.PlaceholderFormat(sq.Question)
+	filteredSelectBuilder = filteredSelectBuilder.PlaceholderFormat(sq.Question)
+	agg := s.dbDialect.ConcatAgg(false, filter.QualifyIdentifier(q, "r.Payload"), ",")
+	// Build correlated subquery. This is a correlated subquery that references
+	// the outer query's jobs.UUID, so we use string concatenation for the structure.
+	// The ResourceType value 'Job' is a constant (model.JobResourceType), not user input.
+	// While we could make this more "pure" by avoiding the literal, the performance
+	// and compatibility implications are minimal since this is a constant comparison.
+	sub := fmt.Sprintf("SELECT %s FROM %s AS %s WHERE %s='Job' AND %s = %s",
+		agg,
+		q("resource_references"), q("r"),
+		filter.QualifyIdentifier(q, "r.ResourceType"),
+		filter.QualifyIdentifier(q, "r.ResourceUUID"), filter.QualifyIdentifier(q, "jobs.UUID"))
+	refsExpr := s.dbDialect.ConcatExprs(
+		[]string{"'['", "COALESCE((" + sub + "), '')", "']'"},
+		"",
+	)
+	return qb.
+		Select(q("jobs")+`.*`, refsExpr+" AS "+q("refs")).
+		FromSelect(filteredSelectBuilder, q("jobs"))
 }
 
 func (s *JobStore) scanRows(r *sql.Rows) ([]*model.Job, error) {
 	var jobs []*model.Job
 	for r.Next() {
-		var uuid, displayName, name, namespace, pipelineId, conditions,
+		var uuid, displayName, name, namespace, pipelineId, pipelineName, conditions, serviceAccount,
 			description, parameters, pipelineSpecManifest, workflowSpecManifest string
-		var cronScheduleStartTimeInSec, cronScheduleEndTimeInSec,
-			periodicScheduleStartTimeInSec, periodicScheduleEndTimeInSec, intervalSecond sql.NullInt64
-		var cron, resourceReferencesInString sql.NullString
-		var enabled bool
-		var createdAtInSec, updatedAtInSec, maxConcurrency int64
+		var cronScheduleStartTimeInSec, cronScheduleEndTimeInSec, createdAtInSec,
+			periodicScheduleStartTimeInSec, periodicScheduleEndTimeInSec, intervalSecond, updatedAtInSec sql.NullInt64
+		var cron, resourceReferencesInString, runtimeParameters, pipelineRoot sql.NullString
+		var experimentID, pipelineVersionID, pluginsInput sql.NullString
+		var enabled, noCatchup bool
+		var maxConcurrency int64
 		err := r.Scan(
-			&uuid, &displayName, &name, &namespace, &description,
-			&maxConcurrency, &createdAtInSec, &updatedAtInSec, &enabled,
+			&uuid, &displayName, &name, &namespace, &serviceAccount, &description,
+			&maxConcurrency, &noCatchup, &createdAtInSec, &updatedAtInSec, &enabled,
 			&cronScheduleStartTimeInSec, &cronScheduleEndTimeInSec, &cron,
 			&periodicScheduleStartTimeInSec, &periodicScheduleEndTimeInSec, &intervalSecond,
-			&pipelineId, &pipelineSpecManifest, &workflowSpecManifest, &parameters, &conditions, &resourceReferencesInString)
+			&pipelineId, &pipelineName, &pipelineSpecManifest, &workflowSpecManifest, &parameters,
+			&conditions, &runtimeParameters, &pipelineRoot, &experimentID,
+			&pipelineVersionID, &pluginsInput, &resourceReferencesInString)
 		if err != nil {
 			return nil, err
 		}
-		resourceReferences, err := parseResourceReferences(resourceReferencesInString)
-		jobs = append(jobs, &model.Job{
-			UUID:               uuid,
-			DisplayName:        displayName,
-			Name:               name,
-			Namespace:          namespace,
-			Description:        description,
-			Enabled:            enabled,
-			Conditions:         conditions,
-			MaxConcurrency:     maxConcurrency,
-			ResourceReferences: resourceReferences,
+		resourceReferences, _ := parseResourceReferences(resourceReferencesInString)
+		expID := experimentID.String
+		pvID := pipelineVersionID.String
+		if len(resourceReferences) > 0 {
+			if expID == "" {
+				expID = model.GetRefIdFromResourceReferences(resourceReferences, model.ExperimentResourceType)
+			}
+			if namespace == "" {
+				namespace = model.GetRefIdFromResourceReferences(resourceReferences, model.NamespaceResourceType)
+			}
+			if pipelineId == "" {
+				pipelineId = model.GetRefIdFromResourceReferences(resourceReferences, model.PipelineResourceType)
+			}
+			if pvID == "" {
+				pvID = model.GetRefIdFromResourceReferences(resourceReferences, model.PipelineVersionResourceType)
+			}
+		}
+		runtimeConfig := parseRuntimeConfig(runtimeParameters, pipelineRoot)
+		job := &model.Job{
+			UUID:           uuid,
+			DisplayName:    displayName,
+			K8SName:        name,
+			Namespace:      namespace,
+			ServiceAccount: serviceAccount,
+			Description:    description,
+			Enabled:        enabled,
+			Conditions:     conditions,
+			ExperimentId:   expID,
+			MaxConcurrency: maxConcurrency,
+			NoCatchup:      noCatchup,
+			// ResourceReferences: resourceReferences,
 			Trigger: model.Trigger{
 				CronSchedule: model.CronSchedule{
 					CronScheduleStartTimeInSec: NullInt64ToPointer(cronScheduleStartTimeInSec),
@@ -178,19 +318,30 @@ func (s *JobStore) scanRows(r *sql.Rows) ([]*model.Job, error) {
 			},
 			PipelineSpec: model.PipelineSpec{
 				PipelineId:           pipelineId,
-				PipelineSpecManifest: pipelineSpecManifest,
-				WorkflowSpecManifest: workflowSpecManifest,
-				Parameters:           parameters,
+				PipelineVersionId:    pvID,
+				PipelineName:         pipelineName,
+				PipelineSpecManifest: model.LargeText(pipelineSpecManifest),
+				WorkflowSpecManifest: model.LargeText(workflowSpecManifest),
+				Parameters:           model.LargeText(parameters),
+				RuntimeConfig:        runtimeConfig,
 			},
-			CreatedAtInSec: createdAtInSec,
-			UpdatedAtInSec: updatedAtInSec,
-		})
+			CreatedAtInSec: createdAtInSec.Int64,
+			UpdatedAtInSec: updatedAtInSec.Int64,
+		}
+		if pluginsInput.Valid {
+			lt := model.LargeText(pluginsInput.String)
+			job.PluginsInputString = &lt
+		}
+		job = job.ToV2()
+		jobs = append(jobs, job)
 	}
 	return jobs, nil
 }
 
 func (s *JobStore) DeleteJob(id string) error {
-	jobSql, jobArgs, err := sq.Delete("jobs").Where(sq.Eq{"UUID": id}).ToSql()
+	q := s.dbDialect.QuoteIdentifier
+	qb := s.dbDialect.QueryBuilder()
+	jobSQL, jobArgs, err := qb.Delete(q("jobs")).Where(sq.Eq{q("UUID"): id}).ToSql()
 	if err != nil {
 		return util.NewInternalServerError(err,
 			"Failed to create query to delete job: %s", id)
@@ -198,14 +349,22 @@ func (s *JobStore) DeleteJob(id string) error {
 	// Use a transaction to make sure both run and its resource references are stored.
 	tx, err := s.db.Begin()
 	if err != nil {
-		return util.NewInternalServerError(err, "Failed to create a new transaction to delete job.")
+		return util.NewInternalServerError(err, "Failed to create a new transaction to delete job")
 	}
-	_, err = tx.Exec(jobSql, jobArgs...)
+	defer tx.Rollback()
+	_, err = tx.Exec(jobSQL, jobArgs...)
 	if err != nil {
 		tx.Rollback()
 		return util.NewInternalServerError(err, "Failed to delete job %s from table", id)
 	}
-	err = s.resourceReferenceStore.DeleteResourceReferences(tx, id, common.Job)
+	stateSQL, stateArgs, err := qb.Delete(q("recurring_run_states")).Where(sq.Eq{q("JobUUID"): id}).ToSql()
+	if err != nil {
+		return util.NewInternalServerError(err, "Failed to build scheduling-state deletion for recurring run %s", id)
+	}
+	if _, err = tx.Exec(stateSQL, stateArgs...); err != nil {
+		return util.NewInternalServerError(err, "Failed to delete scheduling state for recurring run %s", id)
+	}
+	err = s.resourceReferenceStore.DeleteResourceReferences(tx, id, model.JobResourceType)
 	if err != nil {
 		tx.Rollback()
 		return util.NewInternalServerError(err, "Failed to delete resource references from table for job %v ", id)
@@ -219,68 +378,91 @@ func (s *JobStore) DeleteJob(id string) error {
 }
 
 func (s *JobStore) CreateJob(j *model.Job) (*model.Job, error) {
-	jobSql, jobArgs, err := sq.
-		Insert("jobs").
+	// Add creation/update time.
+	j = j.ToV2()
+	now := s.time.Now().Unix()
+	j.CreatedAtInSec = now
+	j.UpdatedAtInSec = now
+
+	q := s.dbDialect.QuoteIdentifier
+	qb := s.dbDialect.QueryBuilder()
+	jobSQL, jobArgs, err := qb.
+		Insert(q("jobs")).
 		SetMap(sq.Eq{
-			"UUID":                           j.UUID,
-			"DisplayName":                    j.DisplayName,
-			"Name":                           j.Name,
-			"Namespace":                      j.Namespace,
-			"Description":                    j.Description,
-			"MaxConcurrency":                 j.MaxConcurrency,
-			"Enabled":                        j.Enabled,
-			"Conditions":                     j.Conditions,
-			"CronScheduleStartTimeInSec":     PointerToNullInt64(j.CronScheduleStartTimeInSec),
-			"CronScheduleEndTimeInSec":       PointerToNullInt64(j.CronScheduleEndTimeInSec),
-			"Schedule":                       PointerToNullString(j.Cron),
-			"PeriodicScheduleStartTimeInSec": PointerToNullInt64(j.PeriodicScheduleStartTimeInSec),
-			"PeriodicScheduleEndTimeInSec":   PointerToNullInt64(j.PeriodicScheduleEndTimeInSec),
-			"IntervalSecond":                 PointerToNullInt64(j.IntervalSecond),
-			"CreatedAtInSec":                 j.CreatedAtInSec,
-			"UpdatedAtInSec":                 j.UpdatedAtInSec,
-			"PipelineId":                     j.PipelineId,
-			"PipelineSpecManifest":           j.PipelineSpecManifest,
-			"WorkflowSpecManifest":           j.WorkflowSpecManifest,
-			"Parameters":                     j.Parameters,
+			q("UUID"):                           j.UUID,
+			q("DisplayName"):                    j.DisplayName,
+			q("Name"):                           j.K8SName,
+			q("Namespace"):                      j.Namespace,
+			q("ServiceAccount"):                 j.ServiceAccount,
+			q("Description"):                    j.Description,
+			q("MaxConcurrency"):                 j.MaxConcurrency,
+			q("NoCatchup"):                      j.NoCatchup,
+			q("Enabled"):                        j.Enabled,
+			q("Conditions"):                     j.Conditions,
+			q("CronScheduleStartTimeInSec"):     PointerToNullInt64(j.Trigger.CronSchedule.CronScheduleStartTimeInSec),
+			q("CronScheduleEndTimeInSec"):       PointerToNullInt64(j.Trigger.CronSchedule.CronScheduleEndTimeInSec),
+			q("Schedule"):                       PointerToNullString(j.Trigger.CronSchedule.Cron),
+			q("PeriodicScheduleStartTimeInSec"): PointerToNullInt64(j.Trigger.PeriodicSchedule.PeriodicScheduleStartTimeInSec),
+			q("PeriodicScheduleEndTimeInSec"):   PointerToNullInt64(j.Trigger.PeriodicSchedule.PeriodicScheduleEndTimeInSec),
+			q("IntervalSecond"):                 PointerToNullInt64(j.Trigger.PeriodicSchedule.IntervalSecond),
+			q("CreatedAtInSec"):                 j.CreatedAtInSec,
+			q("UpdatedAtInSec"):                 j.UpdatedAtInSec,
+			q("PipelineId"):                     j.PipelineSpec.PipelineId,
+			q("PipelineName"):                   j.PipelineSpec.PipelineName,
+			q("PipelineSpecManifest"):           j.PipelineSpec.PipelineSpecManifest,
+			q("WorkflowSpecManifest"):           j.PipelineSpec.WorkflowSpecManifest,
+			q("Parameters"):                     j.PipelineSpec.Parameters,
+			q("RuntimeParameters"):              j.PipelineSpec.RuntimeConfig.Parameters,
+			q("PipelineRoot"):                   j.PipelineSpec.RuntimeConfig.PipelineRoot,
+			q("ExperimentUUID"):                 j.ExperimentId,
+			q("PipelineVersionId"):              j.PipelineSpec.PipelineVersionId,
+			q("PluginsInput"):                   largeTextToNullableSQL(j.PluginsInputString),
 		}).ToSql()
+
 	if err != nil {
 		return nil, util.NewInternalServerError(err, "Failed to create query to add job to job table: %v",
 			err.Error())
 	}
 
-	// Use a transaction to make sure both job and its resource references are stored.
+	// Persist the native record and its scheduling state atomically.
 	tx, err := s.db.Begin()
 	if err != nil {
-		return nil, util.NewInternalServerError(err, "Failed to create a new transaction to create job.")
+		return nil, util.NewInternalServerError(err, "Failed to create a transaction to store job")
 	}
-	_, err = tx.Exec(jobSql, jobArgs...)
+	defer tx.Rollback()
+	_, err = tx.Exec(jobSQL, jobArgs...)
 	if err != nil {
-		tx.Rollback()
-		return nil, util.NewInternalServerError(err, "Failed to store job %v to table", j.Name)
+		return nil, util.NewInternalServerError(err, "Failed to store job %v to table", j.DisplayName)
 	}
-	err = s.resourceReferenceStore.CreateResourceReferences(tx, j.ResourceReferences)
+	stateSQL, stateArgs, err := qb.Insert(q("recurring_run_states")).
+		Columns(q("JobUUID"), q("RequestKey"), q("PipelineVersionID")).Values(j.UUID, "", "").ToSql()
 	if err != nil {
-		tx.Rollback()
-		return nil, util.NewInternalServerError(err, "Failed to store resource references to table for job %v ", j.Name)
+		return nil, util.NewInternalServerError(err, "Failed to build scheduling-state initialization for recurring run %s", j.UUID)
+	}
+	if _, err = tx.Exec(stateSQL, stateArgs...); err != nil {
+		return nil, util.NewInternalServerError(err, "Failed to initialize scheduling state for recurring run %s", j.UUID)
 	}
 
 	err = tx.Commit()
 	if err != nil {
 		tx.Rollback()
-		return nil, util.NewInternalServerError(err, "Failed to store job %v and its resource references to table", j.Name)
+		return nil, util.NewInternalServerError(err, "Failed to store job %v and its scheduling state to table", j.DisplayName)
 	}
 	return j, nil
 }
 
-func (s *JobStore) EnableJob(id string, enabled bool) error {
+func (s *JobStore) ChangeJobMode(id string, enabled bool) error {
 	now := s.time.Now().Unix()
-	sql, args, err := sq.
-		Update("jobs").
+	q := s.dbDialect.QuoteIdentifier
+	qb := s.dbDialect.QueryBuilder()
+	sql, args, err := qb.
+		Update(q("jobs")).
 		SetMap(sq.Eq{
-			"Enabled":        enabled,
-			"UpdatedAtInSec": now}).
-		Where(sq.Eq{"UUID": string(id)}).
-		Where(sq.Eq{"Enabled": !enabled}).
+			q("Enabled"):        enabled,
+			q("UpdatedAtInSec"): now,
+		}).
+		Where(sq.Eq{q("UUID"): id}).
+		Where(sq.Eq{q("Enabled"): !enabled}).
 		ToSql()
 	if err != nil {
 		return util.NewInternalServerError(err, "Error when creating query to enable job %v to %v", id, enabled)
@@ -298,32 +480,58 @@ func (s *JobStore) UpdateJob(swf *util.ScheduledWorkflow) error {
 	if err != nil {
 		return err
 	}
-
-	sql, args, err := sq.
-		Update("jobs").
+	q := s.dbDialect.QuoteIdentifier
+	qb := s.dbDialect.QueryBuilder()
+	updateSQL := qb.
+		Update(q("jobs")).
 		SetMap(sq.Eq{
-			"Name":                           swf.Name,
-			"Namespace":                      swf.Namespace,
-			"Enabled":                        swf.Spec.Enabled,
-			"Conditions":                     swf.ConditionSummary(),
-			"MaxConcurrency":                 swf.MaxConcurrencyOr0(),
-			"Parameters":                     parameters,
-			"UpdatedAtInSec":                 now,
-			"CronScheduleStartTimeInSec":     PointerToNullInt64(swf.CronScheduleStartTimeInSecOrNull()),
-			"CronScheduleEndTimeInSec":       PointerToNullInt64(swf.CronScheduleEndTimeInSecOrNull()),
-			"Schedule":                       swf.CronOrEmpty(),
-			"PeriodicScheduleStartTimeInSec": PointerToNullInt64(swf.PeriodicScheduleStartTimeInSecOrNull()),
-			"PeriodicScheduleEndTimeInSec":   PointerToNullInt64(swf.PeriodicScheduleEndTimeInSecOrNull()),
-			"IntervalSecond":                 swf.IntervalSecondOr0()}).
-		Where(sq.Eq{"UUID": string(swf.UID)}).
-		ToSql()
+			q("Name"): swf.Name,
+			// Namespace changes for recurring runs is forbidden
+			// q(\"Namespace\"):                   swf.Namespace,
+			q("Enabled"):                        swf.Spec.Enabled,
+			q("Conditions"):                     model.StatusState(swf.ConditionSummary()).ToString(),
+			q("MaxConcurrency"):                 swf.MaxConcurrencyOr0(),
+			q("NoCatchup"):                      swf.NoCatchupOrFalse(),
+			q("UpdatedAtInSec"):                 now,
+			q("CronScheduleStartTimeInSec"):     PointerToNullInt64(swf.CronScheduleStartTimeInSecOrNull()),
+			q("CronScheduleEndTimeInSec"):       PointerToNullInt64(swf.CronScheduleEndTimeInSecOrNull()),
+			q("Schedule"):                       swf.CronOrEmpty(),
+			q("PeriodicScheduleStartTimeInSec"): PointerToNullInt64(swf.PeriodicScheduleStartTimeInSecOrNull()),
+			q("PeriodicScheduleEndTimeInSec"):   PointerToNullInt64(swf.PeriodicScheduleEndTimeInSecOrNull()),
+			q("IntervalSecond"):                 swf.IntervalSecondOr0(),
+		})
+	if len(parameters) > 0 {
+		if swf.GetVersion() == util.SWFv1 {
+			updateSQL = updateSQL.SetMap(sq.Eq{q("Parameters"): parameters})
+		} else if swf.GetVersion() == util.SWFv2 {
+			updateSQL = updateSQL.SetMap(sq.Eq{q("RuntimeParameters"): parameters})
+		} else {
+			return util.NewInternalServerError(util.NewInvalidInputError("ScheduledWorkflow has an invalid version: %v", swf.GetVersion()), "Failed to update job %v", swf.UID)
+		}
+	}
+	return s.updateJob(swf, updateSQL)
+}
+
+// UpdateJobStatus keeps the API-created job specification authoritative when
+// reporting a ScheduledWorkflow that namespace users may be able to modify.
+func (s *JobStore) UpdateJobStatus(swf *util.ScheduledWorkflow) error {
+	q := s.dbDialect.QuoteIdentifier
+	updateSQL := s.dbDialect.QueryBuilder().Update(q("jobs")).SetMap(sq.Eq{
+		q("Conditions"):     model.StatusState(swf.ConditionSummary()).ToString(),
+		q("UpdatedAtInSec"): s.time.Now().Unix(),
+	})
+	return s.updateJob(swf, updateSQL)
+}
+
+func (s *JobStore) updateJob(swf *util.ScheduledWorkflow, updateSQL sq.UpdateBuilder) error {
+	q := s.dbDialect.QuoteIdentifier
+	sql, args, err := updateSQL.Where(sq.Eq{q("UUID"): string(swf.UID)}).ToSql()
 	if err != nil {
 		return util.NewInternalServerError(err,
 			"Error while creating query to update job with scheduled workflow: %v: %+v",
 			err, swf.ScheduledWorkflow)
 	}
 	r, err := s.db.Exec(sql, args...)
-
 	if err != nil {
 		return util.NewInternalServerError(err,
 			"Error while updating job with scheduled workflow: %v: %+v",
@@ -345,11 +553,13 @@ func (s *JobStore) UpdateJob(swf *util.ScheduledWorkflow) error {
 	return nil
 }
 
-// factory function for job store
-func NewJobStore(db *DB, time util.TimeInterface) *JobStore {
+// If pipelineStore is provided, it will be used instead of direct database queries for getting pipelines
+// and pipeline versions.
+func NewJobStore(db *sql.DB, time util.TimeInterface, pipelineStore PipelineStoreInterface, d dialect.DBDialect) *JobStore {
 	return &JobStore{
 		db:                     db,
-		resourceReferenceStore: NewResourceReferenceStore(db),
+		resourceReferenceStore: NewResourceReferenceStore(db, pipelineStore, d),
 		time:                   time,
+		dbDialect:              d,
 	}
 }

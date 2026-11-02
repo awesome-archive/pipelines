@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright 2018 Google LLC
+# Copyright 2018 The Kubeflow Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,25 +16,14 @@
 
 set -xe
 
-# K8s Namespace that all resources deployed to
-NAMESPACE=kubeflow
-
 usage()
 {
     echo "usage: run_test.sh
-    --results-gcs-dir GCS directory for the test results. Usually gs://<project-id>/<commit-sha>/api_integration_test
-    [--namespace      k8s namespace where ml-pipelines is deployed. The tests run against the instance in this namespace]
     [-h help]"
 }
 
-while [ "$1" != "" ]; do
+while [[ "$1" != "" ]]; do
     case $1 in
-             --results-gcs-dir )shift
-                                RESULTS_GCS_DIR=$1
-                                ;;
-             --namespace )      shift
-                                NAMESPACE=$1
-                                ;;
              -h | --help )      usage
                                 exit
                                 ;;
@@ -44,42 +33,31 @@ while [ "$1" != "" ]; do
     shift
 done
 
-if [ -z "$RESULTS_GCS_DIR" ]; then
-    usage
-    exit 1
-fi
-
-# Setup Google Cloud SDK, and use it to install kubectl so it gets the right context
-wget -nv https://dl.google.com/dl/cloudsdk/release/google-cloud-sdk.zip
-unzip -qq google-cloud-sdk.zip -d tools
-rm google-cloud-sdk.zip
-tools/google-cloud-sdk/install.sh --usage-reporting=false \
-  --path-update=false --bash-completion=false \
-  --disable-installation-options
-tools/google-cloud-sdk/bin/gcloud -q components install kubectl
-
-if [[ ! -z "${GOOGLE_APPLICATION_CREDENTIALS}" ]]; then
-  tools/google-cloud-sdk/bin/gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
-fi
-
 npm install
 
-# Port forward the UI so tests can work against localhost
-POD=`/src/tools/google-cloud-sdk/bin/kubectl get pods -n ${NAMESPACE} -l app=ml-pipeline-ui -o jsonpath='{.items[0].metadata.name}'`
-/src/tools/google-cloud-sdk/bin/kubectl port-forward -n ${NAMESPACE} ${POD} 3000:3000 &
+KFP_BASE_URL="${KFP_BASE_URL:-http://localhost:3000}"
+export KFP_BASE_URL
+KFP_BASE_HOST=$(node -e "const u = new URL(process.env.KFP_BASE_URL); console.log(u.hostname);")
+KFP_BASE_PORT=$(node -e "const u = new URL(process.env.KFP_BASE_URL); console.log(u.port || (u.protocol === 'https:' ? 443 : 80));")
+ARTIFACT_DIR="${FRONTEND_INTEGRATION_ARTIFACT_DIR:-/tmp/frontend-integration-artifacts}"
+WDIO_JUNIT_OUTPUT_DIR="${WDIO_JUNIT_OUTPUT_DIR:-${ARTIFACT_DIR}}"
+FRONTEND_INTEGRATION_SCREENSHOT_DIR="${FRONTEND_INTEGRATION_SCREENSHOT_DIR:-${ARTIFACT_DIR}/screenshots}"
+PIPELINE_SELECTOR_SCREENSHOT="${PIPELINE_SELECTOR_SCREENSHOT:-${FRONTEND_INTEGRATION_SCREENSHOT_DIR}/kfp-pipeline-selector.png}"
+mkdir -p "${WDIO_JUNIT_OUTPUT_DIR}" "${FRONTEND_INTEGRATION_SCREENSHOT_DIR}"
+export WDIO_JUNIT_OUTPUT_DIR
+export FRONTEND_INTEGRATION_SCREENSHOT_DIR
+export PIPELINE_SELECTOR_SCREENSHOT
 
 # Run Selenium server
+SELENIUM_PORT="${SELENIUM_PORT:-4444}"
 /opt/bin/entry_point.sh &
-./node_modules/.bin/wait-port 127.0.0.1:4444 -t 20000
-./node_modules/.bin/wait-port 127.0.0.1:3000 -t 20000
+./node_modules/.bin/wait-port 127.0.0.1:${SELENIUM_PORT} -t 20000
+./node_modules/.bin/wait-port ${KFP_BASE_HOST}:${KFP_BASE_PORT} -t 20000
 
-export PIPELINE_OUTPUT=${RESULTS_GCS_DIR}/pipeline_output
+# Don't exit early if 'npm test' fails
+set +e
 npm test
 TEST_EXIT_CODE=$?
-
-JUNIT_TEST_RESULT=junit_FrontendIntegrationTestOutput.xml
-
-echo "Copy test result to GCS ${RESULTS_GCS_DIR}/${JUNIT_TEST_RESULT}"
-tools/google-cloud-sdk/bin/gsutil cp ${JUNIT_TEST_RESULT} ${RESULTS_GCS_DIR}/${JUNIT_TEST_RESULT}
+set -e
 
 exit $TEST_EXIT_CODE

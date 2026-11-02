@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ package reconciler
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/golang/glog"
 	viewerV1beta1 "github.com/kubeflow/pipelines/backend/src/crd/pkg/apis/viewer/v1beta1"
@@ -41,6 +42,8 @@ import (
 )
 
 const viewerTargetPort = 6006
+
+const defaultTensorflowImage = "tensorflow/tensorflow:1.13.2"
 
 // Reconciler implements reconcile.Reconciler for the Viewer CRD.
 type Reconciler struct {
@@ -68,7 +71,7 @@ func New(cli client.Client, scheme *runtime.Scheme, opts *Options) (*Reconciler,
 // Reconcile runs the main logic for reconciling the state of a viewer with a
 // corresponding deployment and service allowing users to access the view under
 // a specific path.
-func (r *Reconciler) Reconcile(req reconcile.Request) (reconcile.Result, error) {
+func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	glog.Infof("Reconcile request: %+v", req)
 
 	view := &viewerV1beta1.Viewer{}
@@ -90,8 +93,12 @@ func (r *Reconciler) Reconcile(req reconcile.Request) (reconcile.Result, error) 
 		return reconcile.Result{}, nil
 	}
 
+	if len(view.Spec.TensorboardSpec.TensorflowImage) == 0 {
+		view.Spec.TensorboardSpec.TensorflowImage = defaultTensorflowImage
+	}
+
 	// Check and maybe delete the oldest viewer before creating the next one.
-	if err := r.maybeDeleteOldestViewer(view.Spec.Type); err != nil {
+	if err := r.maybeDeleteOldestViewer(view.Spec.Type, view.Namespace); err != nil {
 		// Couldn't delete. Requeue.
 		return reconcile.Result{Requeue: true}, err
 	}
@@ -165,14 +172,29 @@ func setPodSpecForTensorboard(view *viewerV1beta1.Viewer, s *corev1.PodSpec) {
 
 	c := &s.Containers[0]
 	c.Name = view.Name + "-pod"
-	c.Image = "tensorflow/tensorflow:1.11.0"
+	c.Image = view.Spec.TensorboardSpec.TensorflowImage
 	c.Args = []string{
 		"tensorboard",
 		fmt.Sprintf("--logdir=%s", view.Spec.TensorboardSpec.LogDir),
 		fmt.Sprintf("--path_prefix=/tensorboard/%s/", view.Name),
 	}
+	isTensorflowV1 := false
+	parts := strings.Split(view.Spec.TensorboardSpec.TensorflowImage, ":")
+	// an image might not contain a tag
+	if len(parts) == 2 {
+		tfImageVersion := parts[1]
+		if strings.HasPrefix(tfImageVersion, `1.`) {
+			isTensorflowV1 = true
+		}
+	}
+	if !isTensorflowV1 {
+		// This is needed for tf 2.0.
+		// https://github.com/kubeflow/pipelines/issues/2440
+		c.Args = append(c.Args, "--bind_all")
+	}
+
 	c.Ports = []corev1.ContainerPort{
-		corev1.ContainerPort{ContainerPort: viewerTargetPort},
+		{ContainerPort: viewerTargetPort},
 	}
 
 }
@@ -245,7 +267,8 @@ func serviceFrom(v *viewerV1beta1.Viewer, deploymentName string) *corev1.Service
 				"viewer":     v.Name,
 			},
 			Ports: []corev1.ServicePort{
-				corev1.ServicePort{
+				{
+					Name:       "http",
 					Protocol:   corev1.ProtocolTCP,
 					Port:       80,
 					TargetPort: intstr.IntOrString{IntVal: viewerTargetPort}},
@@ -254,10 +277,10 @@ func serviceFrom(v *viewerV1beta1.Viewer, deploymentName string) *corev1.Service
 	}
 }
 
-func (r *Reconciler) maybeDeleteOldestViewer(t viewerV1beta1.ViewerType) error {
+func (r *Reconciler) maybeDeleteOldestViewer(t viewerV1beta1.ViewerType, namespace string) error {
 	list := &viewerV1beta1.ViewerList{}
 
-	if err := r.Client.List(context.Background(), &client.ListOptions{}, list); err != nil {
+	if err := r.Client.List(context.Background(), list, &client.ListOptions{Namespace: namespace}); err != nil {
 		return fmt.Errorf("failed to list viewers: %v", err)
 	}
 
@@ -273,5 +296,5 @@ func (r *Reconciler) maybeDeleteOldestViewer(t viewerV1beta1.ViewerType) error {
 		}
 	}
 
-	return r.Client.Delete(context.Background(), oldest, nil)
+	return r.Client.Delete(context.Background(), oldest)
 }

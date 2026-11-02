@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,13 +15,12 @@
  */
 
 import * as React from 'react';
-import Button from '@material-ui/core/Button';
-import CircularProgress from '@material-ui/core/CircularProgress';
-import CloseIcon from '@material-ui/icons/Close';
-import Resizable from 're-resizable';
-import Slide from '@material-ui/core/Slide';
-import { color, commonCss } from '../Css';
+import CloseIcon from '@mui/icons-material/Close';
+import { Resizable } from 're-resizable';
+import { color, commonCss, zIndex } from '../Css';
 import { stylesheet } from 'typestyle';
+
+import { Button, CircularProgress, Slide } from '@mui/material';
 
 const css = stylesheet({
   closeButton: {
@@ -44,7 +43,7 @@ const css = stylesheet({
     position: 'absolute !important' as any,
     right: 0,
     top: 0,
-    zIndex: 2,
+    zIndex: zIndex.SIDE_PANEL,
   },
 });
 
@@ -53,43 +52,68 @@ interface SidePanelProps {
   isOpen: boolean;
   onClose: () => void;
   title: string;
+  defaultWidth?: string | number;
+  children?: React.ReactNode;
 }
 
 class SidePanel extends React.Component<SidePanelProps> {
-  public render(): JSX.Element {
-    const { isBusy, isOpen, onClose, title } = this.props;
-    return <Slide in={isOpen} direction='left'>
-      <Resizable className={css.sidepane} defaultSize={{ width: '70%' }} maxWidth='90%'
-        minWidth={100} enable={{
-          bottom: false,
-          bottomLeft: false,
-          bottomRight: false,
-          left: true,
-          right: false,
-          top: false,
-          topLeft: false,
-          topRight: false,
-        }}>
-        {isOpen && (
-          <div className={commonCss.page}>
-            <div className={commonCss.flex}>
-              <Button className={css.closeButton} onClick={onClose}><CloseIcon /></Button>
-              <div className={css.nodeName}>{title}</div>
-            </div>
-            <div className={commonCss.page}>
+  public componentDidMount(): void {
+    document.addEventListener('keydown', this.handleKeyDown);
+  }
 
-              {isBusy === true && (
-                <CircularProgress size={30} className={commonCss.absoluteCenter} />
-              )}
+  public componentWillUnmount(): void {
+    document.removeEventListener('keydown', this.handleKeyDown);
+  }
 
+  private handleKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape' && this.props.isOpen) {
+      this.props.onClose();
+    }
+  };
+
+  public render(): React.JSX.Element {
+    const { isBusy, isOpen, onClose, title, defaultWidth } = this.props;
+    return (
+      <Slide in={isOpen} direction='left'>
+        {/* Wrapper div is required for MUI v5 Slide: Slide expects a single DOM element child that can receive a ref. */}
+        <div>
+          <Resizable
+            className={css.sidepane}
+            defaultSize={{ width: defaultWidth ? defaultWidth : '70%' }}
+            maxWidth='90%'
+            minWidth={100}
+            enable={{
+              bottom: false,
+              bottomLeft: false,
+              bottomRight: false,
+              left: true,
+              right: false,
+              top: false,
+              topLeft: false,
+              topRight: false,
+            }}
+          >
+            {isOpen && (
               <div className={commonCss.page}>
-                {this.props.children}
+                <div className={commonCss.flex}>
+                  <Button aria-label='close' className={css.closeButton} onClick={onClose}>
+                    <CloseIcon />
+                  </Button>
+                  <div className={css.nodeName}>{title}</div>
+                </div>
+                <div className={commonCss.page}>
+                  {isBusy === true && (
+                    <CircularProgress size={30} className={commonCss.absoluteCenter} />
+                  )}
+
+                  <div className={commonCss.page}>{this.props.children}</div>
+                </div>
               </div>
-            </div>
-          </div>
-        )}
-      </Resizable>
-    </Slide>;
+            )}
+          </Resizable>
+        </div>
+      </Slide>
+    );
   }
 }
 

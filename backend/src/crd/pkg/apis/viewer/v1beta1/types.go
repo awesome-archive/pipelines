@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -59,7 +59,8 @@ const (
 type TensorboardSpec struct {
 	// LogDir is the location of the log directory to be read by tensorboard, i.e.,
 	// ---log_dir.
-	LogDir string `json:"logDir"`
+	LogDir          string `json:"logDir"`
+	TensorflowImage string `json:"tensorflowImage"`
 }
 
 // ViewerSpec is the spec for a Viewer resource.

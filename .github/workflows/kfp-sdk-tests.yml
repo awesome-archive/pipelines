@@ -1,0 +1,63 @@
+name: KFP SDK Tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    paths:
+      - '**/pyproject.toml'
+      - 'uv.lock'
+      - 'api/**'
+      - 'sdk/**'
+      - 'test_data/sdk_compiled_pipelines/**'
+      - 'test_data/component_migration_test.py'
+      - 'test/presubmit-tests-sdk.sh'
+      - '.github/workflows/kfp-sdk-tests.yml'
+      - '.github/actions/setup-python/**'
+      - '!**/*.md'
+      - '!**/OWNERS'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sdk-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.13']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      with:
+        persist-credentials: false
+
+    - name: Setup Python with uv
+      uses: ./.github/actions/setup-python
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install protobuf dependencies & generate proto files
+      id: install-protobuf-deps
+      uses: ./.github/actions/protobuf
+
+    - name: Run SDK Tests
+      env:
+        # We setup the env in the CI
+        SETUP_ENV: false
+        REPO_NAME: ${{ github.repository }}
+        PULL_NUMBER: ${{ github.event.pull_request.number }}
+        PYTEST_PARALLEL_WORKERS: 2
+      run: |
+        ./test/presubmit-tests-sdk.sh
+
+    - name: Compile shared container fixtures without legacy YAML
+      run: |
+        # Source-tree Google Cloud components are outside this migration's scope.
+        python -m pytest -q test_data/component_migration_test.py

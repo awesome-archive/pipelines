@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,27 +17,82 @@
 import * as React from 'react';
 
 import DetailsTable from './DetailsTable';
-import { create } from 'react-test-renderer';
+import { render } from '@testing-library/react';
+
+vi.mock('./Editor', () => ({
+  default: ({ value }: { value: string }) => <pre data-testid='Editor'>{value}</pre>,
+}));
 
 describe('DetailsTable', () => {
   it('shows no rows', () => {
-    const tree = create(<DetailsTable fields={[]} />);
-    expect(tree).toMatchSnapshot();
+    const { container } = render(<DetailsTable fields={[]} />);
+    expect(container).toMatchInlineSnapshot(`
+      <div>
+        <div />
+      </div>
+    `);
   });
 
   it('shows one row', () => {
-    const tree = create(<DetailsTable fields={[['key', 'value']]} />);
-    expect(tree).toMatchSnapshot();
+    const { container } = render(<DetailsTable fields={[['key', 'value']]} />);
+    expect(container).toMatchInlineSnapshot(`
+      <div>
+        <div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              value
+            </span>
+          </div>
+        </div>
+      </div>
+    `);
   });
 
   it('shows a row with a title', () => {
-    const tree = create(<DetailsTable title='some title' fields={[['key', 'value']]} />);
-    expect(tree).toMatchSnapshot();
+    const { container } = render(<DetailsTable title='some title' fields={[['key', 'value']]} />);
+    expect(container).toMatchInlineSnapshot(`
+      <div>
+        <div
+          class="header2_f1tq2tps"
+        >
+          some title
+        </div>
+        <div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              value
+            </span>
+          </div>
+        </div>
+      </div>
+    `);
   });
 
   it('shows key and value for large values', () => {
-    const tree = create(<DetailsTable fields={[
-      ['key', `Lorem Ipsum is simply dummy text of the printing and typesetting
+    const { container } = render(
+      <DetailsTable
+        fields={[
+          [
+            'key',
+            `Lorem Ipsum is simply dummy text of the printing and typesetting
       industry. Lorem Ipsum has been the industry's standard dummy text ever
       since the 1500s, when an unknown printer took a galley of type and
       scrambled it to make a type specimen book. It has survived not only five
@@ -45,26 +100,423 @@ describe('DetailsTable', () => {
       essentially unchanged. It was popularised in the 1960s with the release
       of Letraset sheets containing Lorem Ipsum passages, and more recently
       with desktop publishing software like Aldus PageMaker including versions
-      of Lorem Ipsum.`]
-    ]} />).toJSON();
-    expect(tree).toMatchSnapshot();
+      of Lorem Ipsum.`,
+          ],
+        ]}
+      />,
+    );
+    expect(container).toMatchInlineSnapshot(`
+      <div>
+        <div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              Lorem Ipsum is simply dummy text of the printing and typesetting
+            industry. Lorem Ipsum has been the industry's standard dummy text ever
+            since the 1500s, when an unknown printer took a galley of type and
+            scrambled it to make a type specimen book. It has survived not only five
+            centuries, but also the leap into electronic typesetting, remaining
+            essentially unchanged. It was popularised in the 1960s with the release
+            of Letraset sheets containing Lorem Ipsum passages, and more recently
+            with desktop publishing software like Aldus PageMaker including versions
+            of Lorem Ipsum.
+            </span>
+          </div>
+        </div>
+      </div>
+    `);
   });
 
   it('shows key and value in row', () => {
-    const tree = create(<DetailsTable fields={[['key', 'value']]} />).toJSON();
-    expect(tree).toMatchSnapshot();
+    const { container } = render(<DetailsTable fields={[['key', 'value']]} />);
+    expect(container).toMatchInlineSnapshot(`
+      <div>
+        <div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              value
+            </span>
+          </div>
+        </div>
+      </div>
+    `);
   });
 
-  it('shows keys and values in a bunch of rows', () => {
-    const tree = create(<DetailsTable fields={[
-      ['key1', 'value1'],
-      ['key2', 'value2'],
-      ['key3', 'value3'],
-      ['key4', 'value4'],
-      ['key5', 'value5'],
-      ['key6', 'value6'],
-      ['key6', 'value7'],
-    ]} />).toJSON();
-    expect(tree).toMatchSnapshot();
+  it('shows key and JSON value in row', () => {
+    const { container } = render(
+      <DetailsTable fields={[['key', JSON.stringify([{ jsonKey: 'jsonValue' }])]]} />,
+    );
+    expect(container).toMatchInlineSnapshot(`
+      <div>
+        <div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key
+            </span>
+            <pre
+              data-testid="Editor"
+            >
+              [
+        {
+          "jsonKey": "jsonValue"
+        }
+      ]
+            </pre>
+          </div>
+        </div>
+      </div>
+    `);
+  });
+
+  it('does render arrays as JSON', () => {
+    const { container } = render(<DetailsTable fields={[['key', '[]']]} />);
+    expect(container).toMatchInlineSnapshot(`
+      <div>
+        <div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key
+            </span>
+            <pre
+              data-testid="Editor"
+            >
+              []
+            </pre>
+          </div>
+        </div>
+      </div>
+    `);
+  });
+
+  it('does render empty object as JSON', () => {
+    const { container } = render(<DetailsTable fields={[['key', '{}']]} />);
+    expect(container).toMatchInlineSnapshot(`
+      <div>
+        <div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key
+            </span>
+            <pre
+              data-testid="Editor"
+            >
+              {}
+            </pre>
+          </div>
+        </div>
+      </div>
+    `);
+  });
+
+  it('does not render nulls as JSON', () => {
+    const { container } = render(<DetailsTable fields={[['key', 'null']]} />);
+    expect(container).toMatchInlineSnapshot(`
+      <div>
+        <div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              null
+            </span>
+          </div>
+        </div>
+      </div>
+    `);
+  });
+
+  it('does not render numbers as JSON', () => {
+    const { container } = render(<DetailsTable fields={[['key', '10']]} />);
+    expect(container).toMatchInlineSnapshot(`
+      <div>
+        <div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              10
+            </span>
+          </div>
+        </div>
+      </div>
+    `);
+  });
+
+  it('does not render strings as JSON', () => {
+    const { container } = render(<DetailsTable fields={[['key', '"some string"']]} />);
+    expect(container).toMatchInlineSnapshot(`
+      <div>
+        <div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              "some string"
+            </span>
+          </div>
+        </div>
+      </div>
+    `);
+  });
+
+  it('does not render booleans as JSON', () => {
+    const { container } = render(
+      <DetailsTable
+        fields={[
+          ['key1', 'true'],
+          ['key2', 'false'],
+        ]}
+      />,
+    );
+    expect(container).toMatchInlineSnapshot(`
+      <div>
+        <div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key1
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              true
+            </span>
+          </div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key2
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              false
+            </span>
+          </div>
+        </div>
+      </div>
+    `);
+  });
+
+  it('shows keys and values for multiple rows', () => {
+    const { container } = render(
+      <DetailsTable
+        fields={[
+          ['key1', 'value1'],
+          ['key2', JSON.stringify([{ jsonKey: 'jsonValue2' }])],
+          ['key3', 'value3'],
+          ['key4', 'value4'],
+          ['key5', JSON.stringify({ jsonKey: { nestedJsonKey: 'jsonValue' } })],
+          ['key6', 'value6'],
+          ['key6', 'value7'],
+          ['key', { key: 'foobar', bucket: 'bucket', endpoint: 's3.amazonaws.com' }],
+        ]}
+      />,
+    );
+    expect(container).toMatchInlineSnapshot(`
+      <div>
+        <div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key1
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              value1
+            </span>
+          </div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key2
+            </span>
+            <pre
+              data-testid="Editor"
+            >
+              [
+        {
+          "jsonKey": "jsonValue2"
+        }
+      ]
+            </pre>
+          </div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key3
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              value3
+            </span>
+          </div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key4
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              value4
+            </span>
+          </div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key5
+            </span>
+            <pre
+              data-testid="Editor"
+            >
+              {
+        "jsonKey": {
+          "nestedJsonKey": "jsonValue"
+        }
+      }
+            </pre>
+          </div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key6
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              value6
+            </span>
+          </div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key6
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              value7
+            </span>
+          </div>
+          <div
+            class="row_f16w1c9n"
+          >
+            <span
+              class="key_f1e93q8f"
+            >
+              key
+            </span>
+            <span
+              class="valueText_f1nujmdy"
+            >
+              [object Object]
+            </span>
+          </div>
+        </div>
+      </div>
+    `);
+  });
+
+  it('does render values with the provided valueComponent', () => {
+    const ValueComponent: React.FC<any> = ({ value, ...rest }) => (
+      <a data-testid='value-component' {...rest}>
+        {JSON.stringify(value)}
+      </a>
+    );
+    const { getByTestId } = render(
+      <DetailsTable
+        fields={[['key2', { key: 'foobar', bucket: 'bucket', endpoint: 's3.amazonaws.com' }]]}
+        valueComponent={ValueComponent}
+        valueComponentProps={{ extraprop: 'extra' }}
+      />,
+    );
+    expect(getByTestId('value-component')).toMatchInlineSnapshot(`
+      <a
+        data-testid="value-component"
+        extraprop="extra"
+      >
+        {"key":"foobar","bucket":"bucket","endpoint":"s3.amazonaws.com"}
+      </a>
+    `);
   });
 });

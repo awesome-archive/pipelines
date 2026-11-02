@@ -1,0 +1,52 @@
+name: kfp-kubernetes library tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    paths:
+      - '**/pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/kfp-kubernetes-library-test.yml'
+      - '.github/actions/setup-python/**'
+      - '.github/actions/protobuf/**'
+      - 'sdk/python/**'
+      - 'api/v2alpha1/**'
+      - 'kubernetes_platform/**'
+      - '!**/*.md'
+      - '!**/OWNERS'
+
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  kfp-kubernetes-library-test:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: [
+          { 'version': '3.11' },
+          { 'version': '3.13' }
+        ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Python with uv
+        uses: ./.github/actions/setup-python
+        with:
+          python-version: ${{matrix.python.version}}
+
+      - name: Install protobuf dependencies & generate proto files
+        id: install-protobuf-deps
+        uses: ./.github/actions/protobuf
+
+      - name: Run tests
+        run: uv run pytest ./sdk/python/test/kubernetes

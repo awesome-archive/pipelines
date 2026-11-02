@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,12 +15,12 @@
 package storage
 
 import (
-	sq "github.com/Masterminds/squirrel"
-	"github.com/kubeflow/pipelines/backend/src/common/util"
-)
+	"database/sql"
 
-var (
-	defaultDBStatus = sq.Eq{"HaveSamplesLoaded": false}
+	sq "github.com/Masterminds/squirrel"
+	"github.com/golang/glog"
+	"github.com/kubeflow/pipelines/backend/src/apiserver/common/sql/dialect"
+	"github.com/kubeflow/pipelines/backend/src/common/util"
 )
 
 type DBStatusStoreInterface interface {
@@ -28,62 +28,77 @@ type DBStatusStoreInterface interface {
 	MarkSampleLoaded() error
 }
 
+const colHaveSamplesLoaded = "HaveSamplesLoaded"
+
 // Implementation of a DBStatusStoreInterface. This store read/write state of the database.
 // For now we store status like whether sample is loaded.
 type DBStatusStore struct {
-	db *DB
+	db        *sql.DB
+	dbDialect dialect.DBDialect
 }
 
 func (s *DBStatusStore) InitializeDBStatusTable() error {
-	getDBStatusSql, getDBStatusArgs, err := sq.Select("*").From("db_statuses").ToSql()
-	if err != nil {
-		return util.NewInternalServerError(err, "Error creating query to get database status.")
-	}
+	q := s.dbDialect.QuoteIdentifier
+	qb := s.dbDialect.QueryBuilder()
 	tx, err := s.db.Begin()
 	if err != nil {
-		return util.NewInternalServerError(err, "Failed to create a new transaction to initialize database status.")
+		return util.NewInternalServerError(err, "Failed to create a new transaction to initialize database status")
 	}
+	defer tx.Rollback()
 
-	rows, err := tx.Query(getDBStatusSql, getDBStatusArgs...)
+	sqlSelect, argsSelect, err := qb.Select("*").From(q("db_statuses")).ToSql()
 	if err != nil {
-		tx.Rollback()
-		return util.NewInternalServerError(err, "Failed to load database status.")
+		return util.NewInternalServerError(err, "Failed to create query to check db_statuses table")
 	}
+	rows, err := tx.Query(sqlSelect, argsSelect...)
+	if err != nil {
+		return util.NewInternalServerError(err, "Failed to load database status")
+	}
+	defer rows.Close()
+	if err := rows.Err(); err != nil {
+		return util.NewInternalServerError(err, "Failed to load database status")
+	}
+	next := rows.Next()
 
 	// The table is not initialized
-	if !rows.Next() {
-		sql, args, queryErr := sq.
-			Insert("db_statuses").
-			SetMap(defaultDBStatus).
+	if !next {
+		sqlInsert, argsInsert, queryErr := qb.
+			Insert(q("db_statuses")).
+			Columns(q(colHaveSamplesLoaded)).
+			Values(false).
 			ToSql()
 
 		if queryErr != nil {
-			tx.Rollback()
-			return util.NewInternalServerError(queryErr, "Error creating query to initialize database status table.")
+			return util.NewInternalServerError(queryErr, "Error creating query to initialize database status table")
 		}
 
-		_, err = tx.Exec(sql, args...)
+		_, err = tx.Exec(sqlInsert, argsInsert...)
 		if err != nil {
-			tx.Rollback()
-			return util.NewInternalServerError(err, "Error initializing the database status table.")
+			return util.NewInternalServerError(err, "Error initializing the database status table")
 		}
 	}
 	err = tx.Commit()
 	if err != nil {
-		tx.Rollback()
-		return util.NewInternalServerError(err, "Failed to initializing the database status table.")
+		glog.Error("Failed to commit transaction to initialize database status table")
+		return util.NewInternalServerError(err, "Failed to initializing the database status table")
 	}
 	return nil
 }
 
 func (s *DBStatusStore) HaveSamplesLoaded() (bool, error) {
 	var haveSamplesLoaded bool
-	sql, args, err := sq.Select("*").From("db_statuses").ToSql()
+	q := s.dbDialect.QuoteIdentifier
+	qb := s.dbDialect.QueryBuilder()
+	sql, args, err := qb.Select(q(colHaveSamplesLoaded)).From(q("db_statuses")).ToSql()
 	if err != nil {
-		return false, util.NewInternalServerError(err, "Error creating query to get load sample status.")
+		return false, util.NewInternalServerError(err, "Error creating query to get load sample status")
 	}
 	rows, err := s.db.Query(sql, args...)
 	if err != nil {
+		return false, util.NewInternalServerError(err, "Error when getting load sample status")
+	}
+	defer rows.Close()
+	if err := rows.Err(); err != nil {
 		return false, util.NewInternalServerError(err, "Error when getting load sample status")
 	}
 	if rows.Next() {
@@ -97,24 +112,27 @@ func (s *DBStatusStore) HaveSamplesLoaded() (bool, error) {
 }
 
 func (s *DBStatusStore) MarkSampleLoaded() error {
-	sql, args, err := sq.
-		Update("db_statuses").
-		SetMap(sq.Eq{"HaveSamplesLoaded": true}).
+	q := s.dbDialect.QuoteIdentifier
+	qb := s.dbDialect.QueryBuilder()
+	sql, args, err := qb.
+		Update(q("db_statuses")).
+		SetMap(sq.Eq{q(colHaveSamplesLoaded): true}).
 		ToSql()
 	if err != nil {
-		return util.NewInternalServerError(err, "Error creating query to mark samples as loaded.")
+		return util.NewInternalServerError(err, "Error creating query to mark samples as loaded")
 	}
 	_, err = s.db.Exec(sql, args...)
 	if err != nil {
-		return util.NewInternalServerError(err, "Error mark samples as loaded.")
+		return util.NewInternalServerError(err, "Error mark samples as loaded")
 	}
 	return nil
 }
 
-// factory function for database status store
-func NewDBStatusStore(db *DB) *DBStatusStore {
-	s := &DBStatusStore{db: db}
-	// Initialize database status table
-	s.InitializeDBStatusTable()
-	return s
+// factory function for database status store.
+func NewDBStatusStore(db *sql.DB, d dialect.DBDialect) (*DBStatusStore, error) {
+	s := &DBStatusStore{db: db, dbDialect: d}
+	if err := s.InitializeDBStatusTable(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }

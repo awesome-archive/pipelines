@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package storage
 import (
 	"database/sql"
 
+	"github.com/kubeflow/pipelines/backend/src/apiserver/model"
 	"github.com/kubeflow/pipelines/backend/src/common/util"
 )
 
@@ -52,4 +53,12 @@ func PointerToNullInt64(ip *int64) sql.NullInt64 {
 		Int64: *ip,
 		Valid: true,
 	}
+}
+
+func largeTextToNullableSQL(lt *model.LargeText) *string {
+	if lt == nil || *lt == "" {
+		return nil
+	}
+	s := string(*lt)
+	return &s
 }

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,184 +15,62 @@
 package server
 
 import (
-	"encoding/base64"
-	"encoding/json"
+	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
 
-	"github.com/golang/protobuf/jsonpb"
-	api "github.com/kubeflow/pipelines/backend/api/go_client"
-	"github.com/kubeflow/pipelines/backend/src/apiserver/common"
+	apiv2 "github.com/kubeflow/pipelines/backend/api/v2/go_client"
+	"github.com/kubeflow/pipelines/backend/src/apiserver/filter"
 	"github.com/kubeflow/pipelines/backend/src/apiserver/list"
+	"github.com/kubeflow/pipelines/backend/src/apiserver/model"
 	"github.com/kubeflow/pipelines/backend/src/common/util"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
-const (
-	defaultPageSize = 20
-	maxPageSize     = 200
-)
-
-var experimentModelFieldsBySortableAPIFields = map[string]string{
-	// Sort by CreatedAtInSec by default
-	"":           "CreatedAtInSec",
-	"id":         "UUID",
-	"name":       "Name",
-	"created_at": "CreatedAtInSec",
-}
-
-var pipelineModelFieldsBySortableAPIFields = map[string]string{
-	// Sort by CreatedAtInSec by default
-	"":           "CreatedAtInSec",
-	"id":         "UUID",
-	"name":       "Name",
-	"created_at": "CreatedAtInSec",
-}
-
-var jobModelFieldsBySortableAPIFields = map[string]string{
-	// Sort by CreatedAtInSec by default
-	"":           "CreatedAtInSec",
-	"id":         "UUID",
-	"name":       "DisplayName",
-	"created_at": "CreatedAtInSec",
-	"package_id": "PipelineId",
-}
-
-var runModelFieldsBySortableAPIFields = map[string]string{
-	// Sort by CreatedAtInSec by default
-	"":           "CreatedAtInSec",
-	"name":       "DisplayName",
-	"created_at": "CreatedAtInSec",
-}
-
-func ValidateFilter(referenceKey *api.ResourceKey) (*common.FilterContext, error) {
-	filterContext := &common.FilterContext{}
-	if referenceKey != nil {
-		refType, err := common.ToModelResourceType(referenceKey.Type)
-		if err != nil {
-			return nil, util.Wrap(err, "Unrecognized resource reference type.")
-		}
-		filterContext.ReferenceKey = &common.ReferenceKey{Type: refType, ID: referenceKey.Id}
-	}
-	return filterContext, nil
-}
-
-func ValidatePagination(pageToken string, pageSize int, keyFieldName string, queryString string,
-	modelFieldByApiFieldMapping map[string]string) (*common.PaginationContext, error) {
-	sortByFieldName, isDesc, err := parseSortByQueryString(queryString, modelFieldByApiFieldMapping)
-	if err != nil {
-		return nil, util.Wrap(err, "Invalid query string.")
-	}
-	if pageSize < 0 {
-		return nil, util.NewInvalidInputError("The page size should be greater than 0. Got %v", strconv.Itoa(pageSize))
-	}
-	if pageSize == 0 {
-		// Use default page size if not provided.
-		pageSize = defaultPageSize
-	}
-	if pageSize > maxPageSize {
-		pageSize = maxPageSize
-	}
-	if sortByFieldName == "" {
-		// By default, sort by key field.
-		sortByFieldName = keyFieldName
-	}
-	token, err := deserializePageToken(pageToken)
-	if err != nil {
-		return nil, util.Wrap(err, "Invalid page token.")
-	}
-	return &common.PaginationContext{
-		PageSize:        pageSize,
-		SortByFieldName: sortByFieldName,
-		KeyFieldName:    keyFieldName,
-		IsDesc:          isDesc,
-		Token:           token}, nil
-}
-
-func parseSortByQueryString(queryString string, modelFieldByApiFieldMapping map[string]string) (string, bool, error) {
-	// ignore the case of the letter. Split query string by space
-	queryList := strings.Fields(strings.ToLower(queryString))
-	// Check the query string format.
-	if len(queryList) > 2 || (len(queryList) == 2 && queryList[1] != "desc" && queryList[1] != "asc") {
-		return "", false, util.NewInvalidInputError(
-			"Received invalid sort by format `%v`. Supported format: \"field_name\", \"field_name desc\", or \"field_name asc\"", queryString)
-	}
-	isDesc := false
-	if len(queryList) == 2 && queryList[1] == "desc" {
-		isDesc = true
-	}
-	sortByApiField := ""
-	if len(queryList) > 0 {
-		sortByApiField = queryList[0]
-	}
-	// Check if the field can be sorted.
-	sortByFieldName, ok := modelFieldByApiFieldMapping[sortByApiField]
-	if !ok {
-		return "", false, util.NewInvalidInputError("Cannot sort on field %v. Supported fields %v.",
-			sortByApiField, keysString(modelFieldByApiFieldMapping))
-	}
-	return sortByFieldName, isDesc, nil
-}
-
-func keysString(modelFieldByApiFieldMapping map[string]string) string {
-	keys := make([]string, 0, len(modelFieldByApiFieldMapping))
-	for k := range modelFieldByApiFieldMapping {
-		if k != "" {
-			keys = append(keys, k)
-		}
-	}
-	return "[" + strings.Join(keys, ", ") + "]"
-}
-
-// Decode page token. If page token is empty, we assume listing the first page and return a nil Token.
-func deserializePageToken(pageToken string) (*common.Token, error) {
-	if pageToken == "" {
-		return nil, nil
-	}
-	tokenBytes, err := base64.StdEncoding.DecodeString(pageToken)
-	if err != nil {
-		return nil, util.NewInvalidInputErrorWithDetails(err, "Invalid package token.")
-	}
-	var token common.Token
-	err = json.Unmarshal(tokenBytes, &token)
-	if err != nil {
-		return nil, util.NewInvalidInputErrorWithDetails(err, "Invalid package token.")
-	}
-	return &token, nil
-}
+const defaultPageSize = 20
 
 // parseAPIFilter attempts to decode a url-encoded JSON-stringified api
 // filter object. An empty string is considered valid input, and equivalent to
 // the nil filter, which trivially does nothing.
-func parseAPIFilter(encoded string) (*api.Filter, error) {
+func parseAPIFilter(encoded string) (*apiv2.Filter, error) {
 	if encoded == "" {
 		return nil, nil
 	}
-
-	errorF := func(err error) (*api.Filter, error) {
+	decoded, err := url.QueryUnescape(encoded)
+	if err != nil {
 		return nil, util.NewInvalidInputError("failed to parse valid filter from %q: %v", encoded, err)
 	}
 
-	decoded, err := url.QueryUnescape(encoded)
+	transformedJSON, err := transformJSONForBackwardCompatibility(decoded)
 	if err != nil {
-		return errorF(err)
+		fmt.Printf("Failed to transform JSON: %v\n", err)
+		return nil, err
 	}
 
-	f := &api.Filter{}
-	if err := jsonpb.UnmarshalString(string(decoded), f); err != nil {
-		return errorF(err)
+	f := &apiv2.Filter{}
+	if err := protojson.Unmarshal([]byte(transformedJSON), f); err != nil {
+		return nil, util.NewInvalidInputError("failed to parse valid filter from %q: %v", encoded, err)
 	}
 	return f, nil
 }
 
+// Validates list options for a given resource and listing parameters.
+// Filters are decoded using the v2 schema.
 func validatedListOptions(listable list.Listable, pageToken string, pageSize int, sortBy string, filterSpec string) (*list.Options, error) {
 	defaultOpts := func() (*list.Options, error) {
+		if listable == nil {
+			return nil, util.NewInvalidInputError("Please specify a valid type to list. E.g., list runs or list jobs")
+		}
 		f, err := parseAPIFilter(filterSpec)
 		if err != nil {
 			return nil, err
 		}
+		newFilter, err := filter.New(f)
+		if err != nil {
+			return nil, err
+		}
 
-		return list.NewOptions(listable, pageSize, sortBy, f)
+		return list.NewOptions(listable, pageSize, sortBy, newFilter)
 	}
 
 	if pageToken == "" {
@@ -204,6 +82,15 @@ func validatedListOptions(listable list.Listable, pageToken string, pageSize int
 		return nil, err
 	}
 
+	if listable == nil {
+		return nil, util.NewInvalidInputError("Please specify a valid type to list. E.g., list runs or list jobs")
+	}
+	if opts.Filter != nil {
+		// Comparison metadata is derived from the current model, not part of
+		// the user's criteria. Restore it even when only a token is supplied.
+		opts.Filter.SetCaseInsensitiveFields(listable.APIToModelFieldMap(), listable.GetModelName(), listable.CaseInsensitiveFields())
+	}
+
 	if sortBy != "" || filterSpec != "" {
 		// Sanity check that these match the page token.
 		do, err := defaultOpts()
@@ -212,9 +99,102 @@ func validatedListOptions(listable list.Listable, pageToken string, pageSize int
 		}
 
 		if !opts.Matches(do) {
-			return nil, util.NewInvalidInputError("page token does not match the supplied sort by and/or filtering criteria. Either specify the same criteria or leave the latter empty if page token is specified.")
+			return nil, util.NewInvalidInputError("page token does not match the supplied sort by and/or filtering criteria. Either specify the same criteria or leave the latter empty if page token is specified")
 		}
 	}
 
 	return opts, nil
+}
+
+// transformJSONForBackwardCompatibility replaces specific JSON key names to maintain
+// backward compatibility with older APIs. Previously, KFP deviated from the typical
+// snake_case naming convention for protobuf field names for Filter predicate values.
+// This function replaces specific JSON key names to maintain backward compatibility
+// with older APIs.
+// See Predicate.value in backend/api/v2/filter.proto for these values.
+// Previously
+func transformJSONForBackwardCompatibility(jsonStr string) (string, error) {
+	replacer := strings.NewReplacer(
+		`"intValue":`, `"int_value":`,
+		`"longValue":`, `"long_value":`,
+		`"stringValue":`, `"string_value":`,
+		`"timestampValue":`, `"timestamp_value":`,
+		`"intValues":`, `"int_values":`,
+		`"longValues":`, `"long_values":`,
+		`"stringValues":`, `"string_values":`,
+	)
+	return replacer.Replace(jsonStr), nil
+}
+
+// validateFilterV2Artifact creates filter context for artifacts based on namespace
+func validateFilterV2Artifact(namespace string) (*model.FilterContext, error) {
+	filterContext := &model.FilterContext{}
+	if namespace != "" {
+		filterContext.ReferenceKey = &model.ReferenceKey{
+			Type: model.NamespaceResourceType,
+			ID:   namespace,
+		}
+	}
+	return filterContext, nil
+}
+
+// validateNonEmptyIDFilters rejects empty-string elements in ID filter lists.
+// Returns the input unchanged when every element is non-empty.
+func validateNonEmptyIDFilters(ids []string, fieldName string) error {
+	for _, id := range ids {
+		if id == "" {
+			return util.NewInvalidInputError("%s must not contain empty values", fieldName)
+		}
+	}
+	return nil
+}
+
+// validateFilterV2ArtifactTask creates filter contexts for artifact-task relationships.
+// Empty-string IDs are rejected. At least one real ID filter is required; an empty
+// FilterContext is never emitted because that would produce an unscoped store query.
+func validateFilterV2ArtifactTask(taskIds, runIds, artifactIds []string) ([]*model.FilterContext, error) {
+	if err := validateNonEmptyIDFilters(taskIds, "task_ids"); err != nil {
+		return nil, err
+	}
+	if err := validateNonEmptyIDFilters(runIds, "run_ids"); err != nil {
+		return nil, err
+	}
+	if err := validateNonEmptyIDFilters(artifactIds, "artifact_ids"); err != nil {
+		return nil, err
+	}
+
+	var filterContexts []*model.FilterContext
+
+	for _, taskID := range taskIds {
+		filterContexts = append(filterContexts, &model.FilterContext{
+			ReferenceKey: &model.ReferenceKey{
+				Type: model.TaskResourceType,
+				ID:   taskID,
+			},
+		})
+	}
+
+	for _, runID := range runIds {
+		filterContexts = append(filterContexts, &model.FilterContext{
+			ReferenceKey: &model.ReferenceKey{
+				Type: model.RunResourceType,
+				ID:   runID,
+			},
+		})
+	}
+
+	for _, artifactID := range artifactIds {
+		filterContexts = append(filterContexts, &model.FilterContext{
+			ReferenceKey: &model.ReferenceKey{
+				Type: model.ArtifactResourceType,
+				ID:   artifactID,
+			},
+		})
+	}
+
+	if len(filterContexts) == 0 {
+		return nil, util.NewInvalidInputError("At least one filter (task_ids, run_ids, or artifact_ids) is required")
+	}
+
+	return filterContexts, nil
 }

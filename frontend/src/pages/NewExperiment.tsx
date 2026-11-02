@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,19 +15,23 @@
  */
 
 import * as React from 'react';
-import BusyButton from '../atoms/BusyButton';
-import Button from '@material-ui/core/Button';
-import Input from '../atoms/Input';
-import { ApiExperiment } from '../apis/experiment';
-import { Apis } from '../lib/Apis';
-import { Page } from './Page';
-import { RoutePage, QUERY_PARAMS } from '../components/Router';
-import { TextFieldProps } from '@material-ui/core/TextField';
-import { ToolbarProps } from '../components/Toolbar';
-import { URLParser } from '../lib/URLParser';
+import BusyButton from 'src/atoms/BusyButton';
+import Input from 'src/atoms/Input';
+import { V2Experiment } from 'src/apisv2/experiment';
+import { Apis } from 'src/lib/Apis';
+import { Page, PageProps } from 'src/pages/Page';
+import { RoutePage, QUERY_PARAMS } from 'src/components/Router';
+import { TextFieldProps } from '@mui/material/TextField';
+import { ToolbarProps } from 'src/components/Toolbar';
+import { URLParser } from 'src/lib/URLParser';
 import { classes, stylesheet } from 'typestyle';
-import { commonCss, padding, fontsize } from '../Css';
-import { logger, errorToMessage } from '../lib/Utils';
+import { commonCss, padding, fontsize } from 'src/Css';
+import { logger, errorToMessage } from 'src/lib/Utils';
+import { NamespaceContext } from 'src/lib/KubeflowClient';
+import { getLatestVersion } from 'src/pages/NewRunV2';
+import { NewExperimentFC } from 'src/pages/functional_components/NewExperimentFC';
+import { FeatureKey, isFeatureEnabled } from 'src/features';
+import { Button } from '@mui/material';
 
 interface NewExperimentState {
   description: string;
@@ -47,8 +51,7 @@ const css = stylesheet({
   },
 });
 
-class NewExperiment extends Page<{}, NewExperimentState> {
-
+export class NewExperiment extends Page<{ namespace?: string }, NewExperimentState> {
   private _experimentNameRef = React.createRef<HTMLInputElement>();
 
   constructor(props: any) {
@@ -64,18 +67,17 @@ class NewExperiment extends Page<{}, NewExperimentState> {
 
   public getInitialToolbarState(): ToolbarProps {
     return {
-      actions: [],
+      actions: {},
       breadcrumbs: [{ displayName: 'Experiments', href: RoutePage.EXPERIMENTS }],
       pageTitle: 'New experiment',
     };
   }
 
-  public render(): JSX.Element {
+  public render(): React.JSX.Element {
     const { description, experimentName, isbeingCreated, validationError } = this.state;
 
     return (
       <div className={classes(commonCss.page, padding(20, 'lr'))}>
-
         <div className={classes(commonCss.scrollContainer, padding(20, 'lr'))}>
           <div className={commonCss.header}>Experiment details</div>
           {/* TODO: this description needs work. */}
@@ -84,17 +86,39 @@ class NewExperiment extends Page<{}, NewExperimentState> {
             associated runs
           </div>
 
-          <Input id='experimentName' label='Experiment name' inputRef={this._experimentNameRef}
-            required={true} onChange={this.handleChange('experimentName')} value={experimentName}
-            autoFocus={true} variant='outlined' />
-          <Input id='experimentDescription' label='Description (optional)' multiline={true}
-            onChange={this.handleChange('description')} value={description} variant='outlined' />
+          <Input
+            id='experimentName'
+            label='Experiment name'
+            inputRef={this._experimentNameRef}
+            required={true}
+            onChange={this.handleChange('experimentName')}
+            value={experimentName}
+            autoFocus={true}
+            variant='outlined'
+          />
+          <Input
+            id='experimentDescription'
+            label='Description'
+            multiline={true}
+            onChange={this.handleChange('description')}
+            required={false}
+            value={description}
+            variant='outlined'
+          />
 
           <div className={commonCss.flex}>
-            <BusyButton id='createExperimentBtn' disabled={!!validationError} busy={isbeingCreated}
-              className={commonCss.buttonAction} title={'Next'}
-              onClick={this._create.bind(this)} />
-            <Button id='cancelNewExperimentBtn' onClick={() => this.props.history.push(RoutePage.EXPERIMENTS)}>
+            <BusyButton
+              id='createExperimentBtn'
+              disabled={!!validationError}
+              busy={isbeingCreated}
+              className={commonCss.buttonAction}
+              title={'Next'}
+              onClick={this._create.bind(this)}
+            />
+            <Button
+              id='cancelNewExperimentBtn'
+              onClick={() => this.props.navigate(RoutePage.EXPERIMENTS)}
+            >
               Cancel
             </Button>
             <div className={css.errorMessage}>{validationError}</div>
@@ -109,10 +133,11 @@ class NewExperiment extends Page<{}, NewExperimentState> {
   }
 
   public async componentDidMount(): Promise<void> {
+    this._isMounted = true;
     const urlParser = new URLParser(this.props);
     const pipelineId = urlParser.get(QUERY_PARAMS.pipelineId);
     if (pipelineId) {
-      this.setState({ pipelineId });
+      this.setStateSafe({ pipelineId });
     }
 
     this._validate();
@@ -121,34 +146,37 @@ class NewExperiment extends Page<{}, NewExperimentState> {
   public handleChange = (name: string) => (event: any) => {
     const value = (event.target as TextFieldProps).value;
     this.setState({ [name]: value } as any, this._validate.bind(this));
-  }
+  };
 
   private _create(): void {
-    const newExperiment: ApiExperiment = {
+    const newExperiment: V2Experiment = {
       description: this.state.description,
-      name: this.state.experimentName,
+      display_name: this.state.experimentName,
+      namespace: this.props.namespace,
     };
 
     this.setState({ isbeingCreated: true }, async () => {
       try {
-        const response = await Apis.experimentServiceApi.createExperiment(newExperiment);
+        const response = await Apis.experimentServiceApiV2.createExperiment(newExperiment);
         let searchString = '';
         if (this.state.pipelineId) {
+          const latestVersion = await getLatestVersion(this.state.pipelineId);
           searchString = new URLParser(this.props).build({
-            [QUERY_PARAMS.experimentId]: response.id || '',
+            [QUERY_PARAMS.experimentId]: response.experiment_id || '',
             [QUERY_PARAMS.pipelineId]: this.state.pipelineId,
+            [QUERY_PARAMS.pipelineVersionId]: latestVersion?.pipeline_version_id || '',
             [QUERY_PARAMS.firstRunInExperiment]: '1',
           });
         } else {
           searchString = new URLParser(this.props).build({
-            [QUERY_PARAMS.experimentId]: response.id || '',
+            [QUERY_PARAMS.experimentId]: response.experiment_id || '',
             [QUERY_PARAMS.firstRunInExperiment]: '1',
           });
         }
-        this.props.history.push(RoutePage.NEW_RUN + searchString);
+        this.props.navigate(RoutePage.NEW_RUN + searchString);
         this.props.updateSnackbar({
           autoHideDuration: 10000,
-          message: `Successfully created new Experiment: ${newExperiment.name}`,
+          message: `Successfully created new Experiment: ${newExperiment.display_name}`,
           open: true,
         });
       } catch (err) {
@@ -169,9 +197,20 @@ class NewExperiment extends Page<{}, NewExperimentState> {
       }
       this.setState({ validationError: '' });
     } catch (err) {
-      this.setState({ validationError: err.message });
+      this.setState({
+        validationError: err instanceof Error ? err.message : 'Experiment name is required',
+      });
     }
   }
 }
 
-export default NewExperiment;
+const EnhancedNewExperiment: React.FC<PageProps> = (props) => {
+  const namespace = React.useContext(NamespaceContext);
+  return isFeatureEnabled(FeatureKey.FUNCTIONAL_COMPONENT) ? (
+    <NewExperimentFC {...props} namespace={namespace} />
+  ) : (
+    <NewExperiment {...props} namespace={namespace} />
+  );
+};
+
+export default EnhancedNewExperiment;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,26 +14,27 @@
  * limitations under the License.
  */
 
-import * as React from 'react';
+import { render } from '@testing-library/react';
+import { vi } from 'vitest';
 import Page404 from './404';
 import { PageProps } from './Page';
-import { shallow } from 'enzyme';
 
 describe('404', () => {
   function generateProps(): PageProps {
     return {
-      history: {} as any,
+      navigate: vi.fn(),
       location: { pathname: 'some bad page' } as any,
-      match: {} as any,
+      params: {},
       toolbarProps: {} as any,
-      updateBanner: jest.fn(),
-      updateDialog: jest.fn(),
-      updateSnackbar: jest.fn(),
-      updateToolbar: jest.fn(),
+      updateBanner: vi.fn(),
+      updateDialog: vi.fn(),
+      updateSnackbar: vi.fn(),
+      updateToolbar: vi.fn(),
     };
   }
 
   it('renders a 404 page', () => {
-    expect(shallow(<Page404 {...generateProps()} />)).toMatchSnapshot();
+    const { asFragment } = render(<Page404 {...generateProps()} />);
+    expect(asFragment()).toMatchSnapshot();
   });
 });

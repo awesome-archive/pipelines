@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-import * as React from 'react';
-
 type Orientation = 'horizontal' | 'vertical';
 interface SeparatorProps {
   orientation?: Orientation;
@@ -23,18 +21,22 @@ interface SeparatorProps {
 }
 
 const style = (orientation: Orientation, units: number) => {
-  return orientation === 'horizontal' ? {
-    display: 'inline-block',
-    minWidth: units,
-    width: units,
-  } : {
-      display: 'block',
-      flexShrink: 0,
-      height: units,
-      minHeight: units,
-    };
+  return orientation === 'horizontal'
+    ? {
+        display: 'inline-block',
+        minWidth: units,
+        width: units,
+      }
+    : {
+        display: 'block',
+        flexShrink: 0,
+        height: units,
+        minHeight: units,
+      };
 };
 
-export default (props: SeparatorProps) => <span style={
-  style(props.orientation || 'horizontal', props.units || 10)
-} />;
+const Separator = (props: SeparatorProps) => (
+  <span style={style(props.orientation || 'horizontal', props.units || 10)} />
+);
+
+export default Separator;

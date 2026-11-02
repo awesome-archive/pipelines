@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,11 +15,10 @@
  */
 
 import * as React from 'react';
-import { CompareState } from '../pages/Compare';
-import Button from '@material-ui/core/Button';
-import ExpandedIcon from '@material-ui/icons/ArrowDropUp';
+import ExpandedIcon from '@mui/icons-material/ArrowDropUp';
 import { stylesheet, classes } from 'typestyle';
 import { color, fontsize } from '../Css';
+import { Button } from '@mui/material';
 
 const css = stylesheet({
   collapseBtn: {
@@ -39,27 +38,31 @@ const css = stylesheet({
 
 interface CollapseButtonProps {
   collapseSections: { [key: string]: boolean };
-  compareSetState: (state: Partial<CompareState>) => void;
+  collapseSectionsUpdate: (collapseSections: { [key: string]: boolean }) => void;
   sectionName: string;
 }
 
 class CollapseButton extends React.Component<CollapseButtonProps> {
-
-  public render(): JSX.Element {
-    const { collapseSections, compareSetState } = this.props;
+  public render(): React.JSX.Element {
+    const { collapseSections, collapseSectionsUpdate } = this.props;
     const sectionName = this.props.sectionName;
-    return <div>
-      <Button onClick={() => {
-        collapseSections[sectionName] = !collapseSections[sectionName];
-        compareSetState({ collapseSections });
-      }} title='Expand/Collapse this section' className={css.collapseBtn}>
-        <ExpandedIcon className={classes(
-          css.icon,
-          collapseSections[sectionName] ? css.collapsed : '',
-        )} />
-        {sectionName}
-      </Button>
-    </div>;
+    return (
+      <div>
+        <Button
+          onClick={() => {
+            collapseSections[sectionName] = !collapseSections[sectionName];
+            collapseSectionsUpdate(collapseSections);
+          }}
+          title='Expand/Collapse this section'
+          className={css.collapseBtn}
+        >
+          <ExpandedIcon
+            className={classes(css.icon, collapseSections[sectionName] ? css.collapsed : '')}
+          />
+          {sectionName}
+        </Button>
+      </div>
+    );
   }
 }
 

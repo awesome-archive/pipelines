@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,12 +15,15 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
-	workflowapi "github.com/argoproj/argo/pkg/apis/workflow/v1alpha1"
-	workflowclientset "github.com/argoproj/argo/pkg/client/clientset/versioned"
-	workflowinformers "github.com/argoproj/argo/pkg/client/informers/externalversions"
+	workflowapi "github.com/argoproj/argo-workflows/v4/pkg/apis/workflow/v1alpha1"
+	api "github.com/kubeflow/pipelines/backend/api/v2/go_client"
 	commonutil "github.com/kubeflow/pipelines/backend/src/common/util"
 	"github.com/kubeflow/pipelines/backend/src/crd/controller/scheduledworkflow/client"
 	"github.com/kubeflow/pipelines/backend/src/crd/controller/scheduledworkflow/util"
@@ -30,8 +33,16 @@ import (
 	swfScheme "github.com/kubeflow/pipelines/backend/src/crd/pkg/client/clientset/versioned/scheme"
 	swfinformers "github.com/kubeflow/pipelines/backend/src/crd/pkg/client/informers/externalversions"
 	wraperror "github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	log "github.com/sirupsen/logrus"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -41,12 +52,35 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/transport"
 	"k8s.io/client-go/util/workqueue"
 )
 
 const (
 	Workflow          = "Workflow"
 	ScheduledWorkflow = "ScheduledWorkflow"
+)
+
+var (
+	processNextItemDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "process_scheduled_workflow_duration_seconds",
+		Help: "The duration of scheduled workflow handling in seconds",
+	}, []string{"status"})
+
+	processNextItemOperationDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "scheduled_workflow_duration_operation_seconds",
+		Help: "The duration of scheduled workflow handling in seconds",
+	}, []string{"operation", "status"})
+
+	queueSizeGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "scheduled_workflow_queue_size",
+		Help: "Current number of workflows in the queue",
+	})
+
+	processedWorkflowThroughput = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "scheduled_workflow_throughput_total",
+		Help: "Total number of workflows processed (throughput)",
+	})
 )
 
 var (
@@ -61,6 +95,8 @@ type Controller struct {
 	kubeClient     *client.KubeClient
 	swfClient      *client.ScheduledWorkflowClient
 	workflowClient *client.WorkflowClient
+	runClient      api.RunServiceClient
+	multiUser      bool
 
 	// workqueue is a rate limited work queue. This is used to queue work to be
 	// processed instead of performing it as soon as a change happens. This
@@ -71,20 +107,71 @@ type Controller struct {
 
 	// An interface to generate the current time.
 	time commonutil.TimeInterface
+
+	// the timezone loation which the scheduled will use
+	location *time.Location
+
+	// tokenSrc provides a way to get the latest refreshed token when authentication to the REST API server is enabled.
+	// This will be nil when authentication is not enabled.
+	tokenSrc transport.ResettableTokenSource
+
+	// userIdentityHeader is the outgoing gRPC metadata key for user identity in multi-user mode
+	// (e.g. "kubeflow-userid"). It is normalized to lowercase and validated when the controller is created.
+	userIdentityHeader string
+	// userIdentityValue is the value to set for the user identity gRPC metadata key.
+	userIdentityValue string
+}
+
+// gRPC metadata keys are limited to lowercase ASCII letters, digits, and the
+// characters '-', '_', and '.'. See google.golang.org/grpc/metadata and the
+// HTTP/2 header field rules. Keys outside this set can cause outgoing requests
+// to fail at the transport layer, so we validate the configured key up front.
+var validGRPCMetadataKey = regexp.MustCompile(`^[a-z0-9._-]+$`)
+
+// normalizeAndValidateMetadataKey lowercases the given gRPC metadata key (matching
+// grpc-go's own normalization) and verifies it only contains characters allowed in
+// a gRPC metadata key. It returns the normalized key or an error describing why the
+// key is invalid, allowing callers to fail fast at startup instead of risking failed
+// requests during reconciliation.
+func normalizeAndValidateMetadataKey(key string) (string, error) {
+	normalized := strings.ToLower(key)
+	if !validGRPCMetadataKey.MatchString(normalized) {
+		return "", fmt.Errorf("must match %s (lowercase letters, digits, '-', '_', '.')", validGRPCMetadataKey.String())
+	}
+	if strings.HasPrefix(normalized, "grpc-") {
+		return "", fmt.Errorf("keys beginning with \"grpc-\" are reserved by the gRPC runtime and will be silently dropped")
+	}
+	return normalized, nil
 }
 
 // NewController returns a new sample controller
 func NewController(
 	kubeClientSet kubernetes.Interface,
 	swfClientSet swfclientset.Interface,
-	workflowClientSet workflowclientset.Interface,
+	workflowClientSet commonutil.ExecutionClient,
+	runClient api.RunServiceClient,
 	swfInformerFactory swfinformers.SharedInformerFactory,
-	workflowInformerFactory workflowinformers.SharedInformerFactory,
-	time commonutil.TimeInterface) *Controller {
+	executionInformer commonutil.ExecutionInformer,
+	time commonutil.TimeInterface,
+	location *time.Location,
+	tokenSrc transport.ResettableTokenSource,
+	userIdentityHeader string,
+	userIdentityValue string,
+	multiUser bool,
+) (*Controller, error) {
+	// Normalize and validate the user identity metadata key up front so the
+	// controller fails fast at startup rather than risking failed requests
+	// during reconciliation when an invalid key reaches the gRPC transport.
+	if userIdentityHeader != "" {
+		normalizedHeader, err := normalizeAndValidateMetadataKey(userIdentityHeader)
+		if err != nil {
+			return nil, fmt.Errorf("invalid userIdentityHeader %q: %w", userIdentityHeader, err)
+		}
+		userIdentityHeader = normalizedHeader
+	}
 
 	// obtain references to shared informers
 	swfInformer := swfInformerFactory.Scheduledworkflow().V1beta1().ScheduledWorkflows()
-	workflowInformer := workflowInformerFactory.Argoproj().V1alpha1().Workflows()
 
 	// Add controller types to the default Kubernetes Scheme so Events can be
 	// logged for controller types.
@@ -100,22 +187,31 @@ func NewController(
 	controller := &Controller{
 		kubeClient:     client.NewKubeClient(kubeClientSet, recorder),
 		swfClient:      client.NewScheduledWorkflowClient(swfClientSet, swfInformer),
-		workflowClient: client.NewWorkflowClient(workflowClientSet, workflowInformer),
+		runClient:      runClient,
+		multiUser:      multiUser,
+		workflowClient: client.NewWorkflowClient(workflowClientSet, executionInformer),
 		workqueue: workqueue.NewNamedRateLimitingQueue(
 			workqueue.NewItemExponentialFailureRateLimiter(DefaultJobBackOff, MaxJobBackOff), swfregister.Kind),
-		time: time,
+		time:               time,
+		location:           location,
+		tokenSrc:           tokenSrc,
+		userIdentityHeader: userIdentityHeader,
+		userIdentityValue:  userIdentityValue,
 	}
 
 	log.Info("Setting up event handlers")
 
 	// Set up an event handler for when the Scheduled Workflow changes
-	controller.swfClient.AddEventHandler(&cache.ResourceEventHandlerFuncs{
+	_, err := controller.swfClient.AddEventHandler(&cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueueScheduledWorkflow,
 		UpdateFunc: func(old, new interface{}) {
 			controller.enqueueScheduledWorkflow(new)
 		},
 		DeleteFunc: controller.enqueueScheduledWorkflowForDelete,
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	// Set up an event handler for when WorkflowHistory resources change. This
 	// handler will lookup the owner of the given WorkflowHistory, and if it is
@@ -123,7 +219,7 @@ func NewController(
 	// processing. This way, we don't need to implement custom logic for
 	// handling WorkflowHistory resources. More info on this pattern:
 	// https://github.com/kubernetes/community/blob/8cafef897a22026d42f5e5bb3f104febe7e29830/contributors/devel/controllers.md
-	controller.workflowClient.AddEventHandler(&cache.ResourceEventHandlerFuncs{
+	_, err = controller.workflowClient.AddEventHandler(&cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.handleWorkflow,
 		UpdateFunc: func(old, new interface{}) {
 			newWorkflow := new.(*workflowapi.Workflow)
@@ -137,8 +233,11 @@ func NewController(
 		},
 		DeleteFunc: controller.handleWorkflow,
 	})
+	if err != nil {
+		return nil, err
+	}
 
-	return controller
+	return controller, nil
 }
 
 // Run will set up the event handlers for types we are interested in, as well
@@ -193,6 +292,7 @@ func (c *Controller) enqueueScheduledWorkflow(obj interface{}) {
 		runtime.HandleError(fmt.Errorf("Equeuing object: error: %v: %+v", err, obj))
 		return
 	}
+	queueSizeGauge.Set(float64(c.workqueue.Len()))
 	c.workqueue.AddRateLimited(key)
 }
 
@@ -263,6 +363,16 @@ func (c *Controller) handleWorkflow(obj interface{}) {
 // processNextWorkItem will read a single work item off the workqueue and
 // attempt to process it, by calling the syncHandler.
 func (c *Controller) processNextWorkItem() bool {
+	startTime := time.Now()
+	var err error
+	defer func() {
+		if err != nil {
+			processNextItemDuration.WithLabelValues("error").Observe(time.Since(startTime).Seconds())
+		} else {
+			processNextItemDuration.WithLabelValues("ok").Observe(time.Since(startTime).Seconds())
+			processedWorkflowThroughput.Inc()
+		}
+	}()
 	obj, shutdown := c.workqueue.Get()
 
 	if shutdown {
@@ -308,7 +418,7 @@ func (c *Controller) processNextWorkItem() bool {
 		// - when using: workqueue.Forget && workqueue.AddRateLimited()
 		//   The item is reprocessed after the baseDelay
 		// - when using: workqueue.AddRateLimited()
-		//   The item is reprocessed folowing the exponential backoff strategy:
+		//   The item is reprocessed following the exponential backoff strategy:
 		//   baseDelay * 10^(failure count)
 		//   It is not reprocessed earlier due to SharedInformerFactory defaultResync.
 		//   It is not reprocessed earlier even if the resource is deleted/re-created.
@@ -321,7 +431,9 @@ func (c *Controller) processNextWorkItem() bool {
 
 		// Run the syncHandler, passing it the namespace/name string of the
 		// ScheduledWorkflow to be synced.
-		syncAgain, retryOnError, swf, err := c.syncHandler(key)
+		ctx := context.Background()
+		syncAgain, retryOnError, swf, syncError := c.syncHandler(ctx, key)
+		err = syncError
 		if err != nil && retryOnError {
 			// Transient failure. We will retry.
 			c.workqueue.AddRateLimited(obj) // Exponential backoff.
@@ -364,7 +476,7 @@ func (c *Controller) processNextWorkItem() bool {
 // syncHandler compares the actual state with the desired, and attempts to
 // converge the two. It then updates the Status block of the ScheduledWorkflow
 // with the current status of the resource.
-func (c *Controller) syncHandler(key string) (
+func (c *Controller) syncHandler(ctx context.Context, key string) (
 	syncAgain bool, retryOnError bool, swf *util.ScheduledWorkflow, err error) {
 
 	// Convert the namespace/name string into a distinct namespace and name
@@ -376,12 +488,16 @@ func (c *Controller) syncHandler(key string) (
 	}
 
 	// Get the ScheduledWorkflow with this namespace/name
+	startTime := time.Now()
 	swf, err = c.swfClient.Get(namespace, name)
 	if err != nil {
 		// Permanent failure.
 		// The ScheduledWorkflow may no longer exist, we stop processing and do not retry.
+		processNextItemOperationDuration.WithLabelValues("swfget", "error").Observe(time.Since(startTime).Seconds())
 		return false, false, nil,
 			wraperror.Wrapf(err, "ScheduledWorkflow (%s) in work queue no longer exists: %v", key, err)
+	} else {
+		processNextItemOperationDuration.WithLabelValues("swfget", "ok").Observe(time.Since(startTime).Seconds())
 	}
 
 	// Get the current time
@@ -390,36 +506,53 @@ func (c *Controller) syncHandler(key string) (
 	nowEpoch := c.time.Now().Unix()
 
 	// Get active workflows for this ScheduledWorkflow.
-	active, err := c.workflowClient.List(swf.Name,
-		false, /* active workflow */
-		0 /* retrieve all workflows */)
+	startTime = time.Time{}
+	active, err := c.workflowClient.List(
+		swf.Namespace,
+		swf.Name,
+		// active workflow
+		false,
+		// retrieve all workflows
+		0,
+	)
 	if err != nil {
+		processNextItemOperationDuration.WithLabelValues("swflist", "error").Observe(time.Since(startTime).Seconds())
 		return false, true, swf,
 			wraperror.Wrapf(err, "Syncing ScheduledWorkflow (%v): transient failure, can't fetch active workflows: %v", name, err)
+	} else {
+		processNextItemOperationDuration.WithLabelValues("swflist", "ok").Observe(time.Since(startTime).Seconds())
 	}
 
+	startTime = time.Now()
 	// Get completed workflows for this ScheduledWorkflow.
-	completed, err := c.workflowClient.List(swf.Name,
+	completed, err := c.workflowClient.List(swf.Namespace,
+		swf.Name,
 		true, /* completed workflows */
 		swf.MinIndex())
 	if err != nil {
+		processNextItemOperationDuration.WithLabelValues("swflistcompleted", "error").Observe(time.Since(startTime).Seconds())
 		return false, true, swf,
 			wraperror.Wrapf(err, "Syncing ScheduledWorkflow (%v): transient failure, can't fetch completed workflows: %v", name, err)
+	} else {
+		processNextItemOperationDuration.WithLabelValues("swflistcompleted", "ok").Observe(time.Since(startTime).Seconds())
 	}
-
-	workflow, nextScheduledEpoch, err := c.submitNextWorkflowIfNeeded(swf, len(active), nowEpoch)
+	startTime = time.Now()
+	submitted, nextScheduledEpoch, err := c.submitNextWorkflowIfNeeded(ctx, swf, len(active), nowEpoch)
 	if err != nil {
+		processNextItemOperationDuration.WithLabelValues("swfsubmit", "error").Observe(time.Since(startTime).Seconds())
 		return false, true, swf,
 			wraperror.Wrapf(err, "Syncing ScheduledWorkflow (%v): transient failure, can't fetch completed workflows: %v", name, err)
+	} else {
+		processNextItemOperationDuration.WithLabelValues("swfsubmit", "ok").Observe(time.Since(startTime).Seconds())
 	}
 
-	err = c.updateStatus(swf, workflow, active, completed, nextScheduledEpoch, nowEpoch)
+	err = c.updateStatus(ctx, swf, submitted, active, completed, nextScheduledEpoch)
 	if err != nil {
 		return false, true, swf,
 			wraperror.Wrapf(err, "Syncing ScheduledWorkflow (%v): transient failure, can't update swf status: %v", name, err)
 	}
 
-	if workflow != nil {
+	if submitted {
 		// Success. Since we created a new workflow, sync again soon since there might be one more
 		// resource to create.
 		log.WithFields(log.Fields{
@@ -438,22 +571,23 @@ func (c *Controller) syncHandler(key string) (
 // Submits the next workflow if a workflow is due to execute. Returns the submitted workflow,
 // an error (if any), and a boolean indicating (in case of an error) whether handling the
 // ScheduledWorkflow should be attempted again at a later time.
-func (c *Controller) submitNextWorkflowIfNeeded(swf *util.ScheduledWorkflow,
+func (c *Controller) submitNextWorkflowIfNeeded(ctx context.Context, swf *util.ScheduledWorkflow,
 	activeWorkflowCount int, nowEpoch int64) (
-	workflow *commonutil.Workflow, nextScheduledEpoch int64, err error) {
+	submitted bool, nextScheduledEpoch int64, err error) {
 	// Compute the next scheduled time.
 	nextScheduledEpoch, shouldRunNow := swf.GetNextScheduledEpoch(
-		int64(activeWorkflowCount), nowEpoch)
+		int64(activeWorkflowCount), nowEpoch, *c.location)
 
 	if !shouldRunNow {
 		log.WithFields(log.Fields{
 			ScheduledWorkflow: swf.Name,
 		}).Infof("Submitting workflow for ScheduledWorkflow (%v): nothing to submit (next scheduled at: %v)",
 			swf.Name, commonutil.FormatTimeForLogging(nextScheduledEpoch))
-		return nil, nextScheduledEpoch, nil
+		return false, nextScheduledEpoch, nil
 	}
 
-	workflow, err = c.submitNewWorkflowIfNotAlreadySubmitted(swf, nextScheduledEpoch, nowEpoch)
+	var workflowName string
+	submitted, workflowName, nextScheduledEpoch, err = c.submitNewWorkflowIfNotAlreadySubmitted(ctx, swf, nextScheduledEpoch, nowEpoch)
 	if err != nil {
 		log.WithFields(log.Fields{
 			ScheduledWorkflow: swf.Name,
@@ -461,65 +595,278 @@ func (c *Controller) submitNextWorkflowIfNeeded(swf *util.ScheduledWorkflow,
 			swf.Name, err)
 		// There was an error submitting a new workflow.
 		// We should attempt to handle the schedule again at a later time.
-		return nil, nextScheduledEpoch, err
+		return false, nextScheduledEpoch, err
 	}
 	log.WithFields(log.Fields{
 		ScheduledWorkflow: swf.Name,
-		Workflow:          workflow.Get().Name,
+		Workflow:          workflowName,
 	}).Infof("Submitting workflow for ScheduledWorkflow (%v): workflow (%v) successfully submitted (scheduled at: %v)",
-		swf.Name, workflow.Get().Name, commonutil.FormatTimeForLogging(nextScheduledEpoch))
-	return workflow, nextScheduledEpoch, nil
+		swf.Name, workflowName, commonutil.FormatTimeForLogging(nextScheduledEpoch))
+	return submitted, nextScheduledEpoch, nil
 }
 
 func (c *Controller) submitNewWorkflowIfNotAlreadySubmitted(
+	ctx context.Context,
 	swf *util.ScheduledWorkflow, nextScheduledEpoch int64, nowEpoch int64) (
-	*commonutil.Workflow, error) {
+	bool, string, int64, error) {
 
 	workflowName := swf.NextResourceName()
 
-	// Try to fetch this workflow
-	// If it already exists, it means that it was already created in a previous iteration
-	// of this controller but that the controller failed to save this data.
-	foundWorkflow, isNotFoundError, err := c.workflowClient.Get(swf.Namespace,
-		workflowName)
-	if err == nil {
-		// The workflow was already created by a previous iteration of this controller.
-		// Nothing to do except returning the information needed by the controller to update
-		// the ScheduledWorkflow status.
-		return foundWorkflow, nil
-	}
-
-	if !isNotFoundError {
-		// There was an error while attempting to retrieve the workflow
-		return nil, err
+	// Multi-user recovery must reconcile through the API server, which verifies
+	// persisted recurring-run state and returns the authoritative scheduled time.
+	// A namespace-editable Workflow is not proof of an authorized submission.
+	if !c.multiUser {
+		_, isNotFoundError, err := c.workflowClient.Get(swf.Namespace, workflowName)
+		if err == nil {
+			// Recover a single-user submission whose status update was interrupted.
+			return true, workflowName, nextScheduledEpoch, nil
+		}
+		if !isNotFoundError {
+			return false, "", nextScheduledEpoch, err
+		}
 	}
 
 	// If the workflow is not found, we need to create it.
-	newWorkflow := swf.NewWorkflow(nextScheduledEpoch, nowEpoch)
-	createdWorkflow, err := c.workflowClient.Create(swf.Namespace, newWorkflow)
+	if !c.multiUser && swf.Spec.Workflow != nil && swf.Spec.Workflow.Spec != nil {
+		// Only IR-compiled execution templates are supported. This marker check
+		// distinguishes formats; Kubernetes RBAC still controls CRD access.
+		if hasUnsupportedWorkflowTemplate(swf) {
+			return false, "", nextScheduledEpoch, fmt.Errorf(
+				"namespace %s has a legacy workflow template; recreate the recurring run from a KFP IR pipeline", swf.Namespace)
+		}
+		newWorkflow, err := swf.NewWorkflow(nextScheduledEpoch, nowEpoch)
+		if err != nil {
+			return false, "", nextScheduledEpoch, err
+		}
 
-	if err != nil {
-		return nil, err
+		createdWorkflow, err := c.workflowClient.Create(ctx, swf.Namespace, newWorkflow)
+		if err != nil {
+			return false, "", nextScheduledEpoch, err
+		}
+		return true, createdWorkflow.ExecutionName(), nextScheduledEpoch, nil
 	}
-	return createdWorkflow, nil
+
+	if c.tokenSrc != nil {
+		token, err := c.tokenSrc.Token()
+		if err != nil {
+			return false, "", nextScheduledEpoch, fmt.Errorf("failed to get a token to communicate with the REST API: %w", err)
+		}
+
+		ctx = metadata.AppendToOutgoingContext(ctx, "Authorization", "Bearer "+token.AccessToken)
+	}
+
+	// Inject user identity header for multi-user mode authorization.
+	if c.userIdentityHeader != "" && c.userIdentityValue != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, c.userIdentityHeader, c.userIdentityValue)
+	}
+
+	if c.multiUser {
+		// ScheduledWorkflow objects are editable by namespace users. The API server
+		// restores execution inputs from the authorized, persisted recurring run.
+		return c.createRun(ctx, swf, nextScheduledEpoch, &api.CreateRunRequest{Run: &api.Run{
+			RecurringRunId: string(swf.UID),
+			DisplayName:    workflowName,
+			ScheduledAt:    timestamppb.New(time.Unix(nextScheduledEpoch, 0)),
+		}})
+	}
+
+	var runtimeConfig *api.RuntimeConfig
+
+	if swf.Spec.Workflow != nil {
+		runtimeConfig = &api.RuntimeConfig{
+			Parameters:   map[string]*structpb.Value{},
+			PipelineRoot: swf.Spec.Workflow.PipelineRoot,
+		}
+
+		// Expand recurring-run macros such as [[ScheduledTime]], [[Index]] and
+		// [[CurrentTime]] with the trigger's epochs and index, matching the
+		// substitution the embedded-workflow path performs in NewWorkflow. The run
+		// UUID is not known yet, so [[RunUUID]] is left for the API server to expand.
+		formatter := commonutil.NewSWFParameterFormatter("", nextScheduledEpoch, nowEpoch, swf.NextIndex())
+
+		for _, param := range swf.Spec.Workflow.Parameters {
+			val := &structpb.Value{}
+
+			err := val.UnmarshalJSON([]byte(param.Value))
+			if err != nil {
+				return false, "", nextScheduledEpoch, err
+			}
+
+			if stringValue, ok := val.GetKind().(*structpb.Value_StringValue); ok {
+				val = structpb.NewStringValue(formatter.Format(stringValue.StringValue))
+			}
+
+			runtimeConfig.Parameters[param.Name] = val
+		}
+	}
+
+	// Convert PluginsInput from the SWF spec (map[string]apiextensionsv1.JSON)
+	// to the protobuf map expected by the CreateRun request.
+	var pluginsInput map[string]*structpb.Struct
+	if len(swf.Spec.PluginsInput) > 0 {
+		var err error
+		pluginsInput, err = crdPluginsInputToProto(swf.Spec.PluginsInput)
+		if err != nil {
+			return false, "", nextScheduledEpoch, fmt.Errorf("failed to parse plugins_input from SWF spec: %w", err)
+		}
+	}
+
+	return c.createRun(ctx, swf, nextScheduledEpoch, &api.CreateRunRequest{
+		ExperimentId: swf.Spec.ExperimentId,
+		Run: &api.Run{
+			ExperimentId:   swf.Spec.ExperimentId,
+			DisplayName:    swf.NextResourceName(),
+			RecurringRunId: string(swf.UID),
+			RuntimeConfig:  runtimeConfig,
+			PluginsInput:   pluginsInput,
+			// Record the time the run was due, not the time it was created. Without
+			// this the API server falls back to the creation time, which is wrong
+			// whenever the two differ -- most visibly when catch-up is enabled and
+			// the controller deliberately triggers for epochs in the past.
+			ScheduledAt: timestamppb.New(time.Unix(nextScheduledEpoch, 0)),
+			PipelineSource: &api.Run_PipelineVersionReference{
+				PipelineVersionReference: &api.PipelineVersionReference{
+					PipelineId: swf.Spec.PipelineId,
+					// This can be empty, which causes the pipeline's default version to be selected.
+					PipelineVersionId: swf.Spec.PipelineVersionId,
+				},
+			},
+			ServiceAccount: swf.Spec.ServiceAccount,
+		},
+	})
+}
+
+func (c *Controller) createRun(ctx context.Context, swf *util.ScheduledWorkflow, nextScheduledEpoch int64, request *api.CreateRunRequest) (bool, string, int64, error) {
+	run, err := c.runClient.CreateRun(ctx, request)
+	if err != nil {
+		return false, "", nextScheduledEpoch, fmt.Errorf(
+			"failed to create a run from the scheduled workflow (%s/%s): %w", swf.Namespace, swf.Name, err,
+		)
+	}
+
+	if c.multiUser {
+		if run.GetScheduledAt() == nil || run.GetScheduledAt().CheckValid() != nil {
+			return false, "", nextScheduledEpoch, fmt.Errorf("API returned no valid scheduled time for scheduled workflow (%s/%s)", swf.Namespace, swf.Name)
+		}
+		nextScheduledEpoch = run.GetScheduledAt().AsTime().Unix()
+	}
+	return true, run.DisplayName, nextScheduledEpoch, nil
 }
 
 func (c *Controller) updateStatus(
+	ctx context.Context,
 	swf *util.ScheduledWorkflow,
-	workflow *commonutil.Workflow,
+	submitted bool,
 	active []swfapi.WorkflowStatus,
 	completed []swfapi.WorkflowStatus,
-	nextScheduledEpoch int64,
-	nowEpoch int64) error {
+	nextScheduledEpoch int64) error {
 	// NEVER modify objects from the store. It's a read-only, local cache.
 	// You can use DeepCopy() to make a deep copy of original object and modify this copy
 	// Or create a copy manually for better performance
 	swfCopy := util.NewScheduledWorkflow(swf.Get().DeepCopy())
-	swfCopy.UpdateStatus(nowEpoch, workflow, nextScheduledEpoch, active, completed)
+	swfCopy.UpdateStatus(submitted, nextScheduledEpoch, active, completed, c.location)
+
+	// Pre-update check: determine if the Workflow (wf) object has actually changed
+	// by comparing its Status.Conditions, Status.WorkflowHistory, Status.Trigger, and Labels
+	// with the previous copy (swfCopy). `updated` will be true if any of these
+	// fields were modified.
+	//
+	// This check prevents unconditional updates: the controller will only
+	// attempt to update the Workflow if meaningful fields have changed, avoiding
+	// unnecessary writes to the Kubernetes API
+	conditionsWasUpdated := !equality.Semantic.DeepEqual(swf.Status.Conditions, swfCopy.Status.Conditions)
+	workHistoryWasUpdated := !equality.Semantic.DeepEqual(swf.Status.WorkflowHistory, swfCopy.Status.WorkflowHistory)
+	triggerWasUpdated := !equality.Semantic.DeepEqual(swf.Status.Trigger, swfCopy.Status.Trigger)
+	labelsWasUpdated := !equality.Semantic.DeepEqual(swf.Labels, swfCopy.Labels)
+	var updated = conditionsWasUpdated ||
+		workHistoryWasUpdated ||
+		triggerWasUpdated ||
+		labelsWasUpdated
 
 	// Until #38113 is merged, we must use Update instead of UpdateStatus to
 	// update the Status block of the ScheduledWorkflow. UpdateStatus will not
 	// allow changes to the Spec of the resource, which is ideal for ensuring
 	// nothing other than resource status has been updated.
-	return c.swfClient.Update(swf.Namespace, swfCopy)
+	if updated {
+		startTime := time.Now()
+		err := c.swfClient.Update(ctx, swf.Namespace, swfCopy)
+		if err != nil {
+			processNextItemOperationDuration.WithLabelValues("swfupdate", "error").Observe(time.Since(startTime).Seconds())
+		} else {
+			processNextItemOperationDuration.WithLabelValues("swfupdate", "ok").Observe(time.Since(startTime).Seconds())
+		}
+		return err
+	}
+	return nil
+}
+
+// hasUnsupportedWorkflowTemplate rejects embedded templates without the marker
+// emitted by the IR compiler, including old v2-compatible pipeline templates.
+func hasUnsupportedWorkflowTemplate(swf *util.ScheduledWorkflow) bool {
+	if swf == nil {
+		return false
+	}
+
+	if swf.Spec.Workflow == nil || swf.Spec.Workflow.Spec == nil {
+		return false
+	}
+
+	var raw []byte
+	switch v := swf.Spec.Workflow.Spec.(type) {
+	case string:
+		raw = []byte(v)
+	default:
+		var err error
+		raw, err = json.Marshal(v)
+		if err != nil {
+			log.Warnf("Failed to marshal SWF spec to JSON: %v", err)
+			return true
+		}
+	}
+
+	var wf workflowapi.Workflow
+	if err := json.Unmarshal(raw, &wf); err != nil {
+		log.Warnf("Failed to unmarshal SWF spec to JSON: %v", err)
+		return true
+	}
+
+	if hasV2ComponentMarker(wf.Spec.PodMetadata) {
+		return false
+	}
+
+	// Fall back because older ScheduledWorkflow specs may embed a WorkflowSpec without
+	// the top-level Workflow wrapper.
+	var workflowSpec workflowapi.WorkflowSpec
+	if err := json.Unmarshal(raw, &workflowSpec); err != nil {
+		log.Warnf("Failed to unmarshal SWF spec to JSON: %v", err)
+		return true
+	}
+
+	if hasV2ComponentMarker(workflowSpec.PodMetadata) {
+		return false
+	}
+
+	return true
+}
+
+func hasV2ComponentMarker(podMetadata *workflowapi.Metadata) bool {
+	if podMetadata == nil {
+		return false
+	}
+
+	return podMetadata.Labels[commonutil.V2ComponentKey] == "true" || podMetadata.Annotations[commonutil.V2ComponentKey] == "true"
+}
+
+// crdPluginsInputToProto converts the CRD's map[string]apiextensionsv1.JSON
+// representation into the protobuf map expected by the CreateRun request.
+func crdPluginsInputToProto(input map[string]apiextensionsv1.JSON) (map[string]*structpb.Struct, error) {
+	result := make(map[string]*structpb.Struct, len(input))
+	for key, val := range input {
+		s := &structpb.Struct{}
+		if err := protojson.Unmarshal(val.Raw, s); err != nil {
+			return nil, fmt.Errorf("invalid plugins_input entry %q: %w", key, err)
+		}
+		result[key] = s
+	}
+	return result, nil
 }

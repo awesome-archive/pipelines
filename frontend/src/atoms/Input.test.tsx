@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,24 +14,31 @@
  * limitations under the License.
  */
 
-import * as React from 'react';
-
+import { render } from '@testing-library/react';
+import { vi } from 'vitest';
 import Input from './Input';
-import { shallow } from 'enzyme';
-import toJson from 'enzyme-to-json';
-
 
 describe('Input', () => {
-  const handleChange = jest.fn();
+  const handleChange = vi.fn();
   const value = 'some input value';
 
   it('renders with the right styles by default', () => {
-    const tree = shallow(<Input onChange={handleChange('fieldname')} value={value} variant='outlined' />);
-    expect(toJson(tree)).toMatchSnapshot();
+    const { asFragment } = render(
+      <Input onChange={handleChange('fieldname')} value={value} variant='outlined' />,
+    );
+    expect(asFragment()).toMatchSnapshot();
   });
 
   it('accepts height and width as prop overrides', () => {
-    const tree = shallow(<Input height={123} width={456} onChange={handleChange('fieldname')} value={value} variant='outlined' />);
-    expect(toJson(tree)).toMatchSnapshot();
+    const { asFragment } = render(
+      <Input
+        height={123}
+        width={456}
+        onChange={handleChange('fieldname')}
+        value={value}
+        variant='outlined'
+      />,
+    );
+    expect(asFragment()).toMatchSnapshot();
   });
 });

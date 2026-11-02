@@ -1,0 +1,211 @@
+/*
+ * Copyright 2026 The Kubeflow Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import * as React from 'react';
+import { render, screen } from '@testing-library/react';
+import ExecutionNode, { getIcon, getExecutionIcon } from './ExecutionNode';
+import { PipelineTaskTaskState } from 'src/apisv2/run';
+import { ReactFlowProvider } from '@xyflow/react';
+
+describe('ExecutionNode', () => {
+  const renderWithProvider = (component: React.ReactElement) => {
+    return render(<ReactFlowProvider>{component}</ReactFlowProvider>);
+  };
+
+  it('keeps the blue ring for selection without requiring focus', () => {
+    const node = (selected: boolean) => (
+      <ReactFlowProvider>
+        <ExecutionNode id='exec-1' data={{ label: 'train-step' }} selected={selected} />
+      </ReactFlowProvider>
+    );
+    const { rerender } = render(node(false));
+    const button = screen.getByRole('button', { name: 'train-step' });
+    expect(button).not.toHaveClass('ring');
+    rerender(node(true));
+    expect(button).not.toHaveFocus();
+    expect(button).toHaveClass('ring', 'focus:ring');
+    rerender(node(false));
+    expect(button).not.toHaveClass('ring');
+  });
+
+  it('renders the execution label', () => {
+    renderWithProvider(
+      <ExecutionNode id='exec-1' data={{ label: 'train-step', state: undefined }} />,
+    );
+    expect(screen.getByText('train-step')).toBeInTheDocument();
+  });
+
+  it('renders with SUCCEEDED state and correct icon', () => {
+    renderWithProvider(
+      <ExecutionNode
+        id='exec-1'
+        data={{ label: 'completed-step', state: PipelineTaskTaskState.SUCCEEDED }}
+      />,
+    );
+    expect(screen.getByText('completed-step')).toBeInTheDocument();
+    expect(screen.getByTestId('CheckCircleIcon')).toBeInTheDocument();
+  });
+
+  it('renders with RUNNING state and correct icon', () => {
+    renderWithProvider(
+      <ExecutionNode
+        id='exec-1'
+        data={{ label: 'running-step', state: PipelineTaskTaskState.RUNNING }}
+      />,
+    );
+    expect(screen.getByText('running-step')).toBeInTheDocument();
+    expect(screen.getByTestId('RefreshIcon')).toBeInTheDocument();
+  });
+
+  it('renders with FAILED state and correct icon', () => {
+    renderWithProvider(
+      <ExecutionNode
+        id='exec-1'
+        data={{ label: 'failed-step', state: PipelineTaskTaskState.FAILED }}
+      />,
+    );
+    expect(screen.getByText('failed-step')).toBeInTheDocument();
+    expect(screen.getByTestId('ErrorIcon')).toBeInTheDocument();
+  });
+
+  it('shows a warning icon instead of the running icon when a lifecycle message is present', () => {
+    renderWithProvider(
+      <ExecutionNode
+        id='exec-1'
+        data={{
+          label: 'stuck-step',
+          state: PipelineTaskTaskState.RUNNING,
+          lifecycleMessage: 'ImagePullBackOff',
+        }}
+      />,
+    );
+    expect(screen.getByTestId('WarningAmberIcon')).toBeInTheDocument();
+    expect(screen.queryByTestId('RefreshIcon')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('ErrorIcon')).not.toBeInTheDocument();
+  });
+
+  it('announces the warning in the node name', () => {
+    renderWithProvider(
+      <ExecutionNode
+        id='exec-1'
+        data={{
+          label: 'stuck-step',
+          state: PipelineTaskTaskState.RUNNING,
+          lifecycleMessage: 'ImagePullBackOff',
+        }}
+      />,
+    );
+    expect(
+      screen.getByRole('button', { name: 'stuck-step, pod lifecycle warning' }),
+    ).toBeInTheDocument();
+  });
+
+  it('shows the failed icon, not the warning, once the task has failed', () => {
+    renderWithProvider(
+      <ExecutionNode
+        id='exec-1'
+        data={{
+          label: 'oom-step',
+          state: PipelineTaskTaskState.FAILED,
+          lifecycleMessage: 'OOMKilled',
+        }}
+      />,
+    );
+    expect(screen.getByTestId('ErrorIcon')).toBeInTheDocument();
+    expect(screen.queryByTestId('WarningAmberIcon')).not.toBeInTheDocument();
+  });
+
+  it('shows no warning when the lifecycle message is empty', () => {
+    renderWithProvider(
+      <ExecutionNode
+        id='exec-1'
+        data={{ label: 'healthy-step', state: PipelineTaskTaskState.RUNNING, lifecycleMessage: '' }}
+      />,
+    );
+    expect(screen.getByTestId('RefreshIcon')).toBeInTheDocument();
+    expect(screen.queryByTestId('WarningAmberIcon')).not.toBeInTheDocument();
+  });
+
+  it('sets the title attribute', () => {
+    renderWithProvider(
+      <ExecutionNode id='exec-1' data={{ label: 'titled-step', state: undefined }} />,
+    );
+    expect(screen.getByTitle('titled-step')).toBeInTheDocument();
+  });
+
+  it('renders hidden, non-connectable edge anchors', () => {
+    const { container } = renderWithProvider(
+      <ExecutionNode id='exec-1' data={{ label: 'anchored-step', state: undefined }} />,
+    );
+    const handles = container.querySelectorAll('.react-flow__handle');
+
+    expect(handles).toHaveLength(2);
+    handles.forEach((handle) => {
+      expect(handle).toHaveStyle({
+        height: '1px',
+        minHeight: '1px',
+        minWidth: '1px',
+        opacity: '0',
+        pointerEvents: 'none',
+        width: '1px',
+      });
+      expect(handle).not.toHaveClass('connectable');
+      expect(handle).not.toHaveClass('connectablestart');
+      expect(handle).not.toHaveClass('connectableend');
+      expect(handle).not.toHaveClass('connectionindicator');
+    });
+  });
+});
+
+describe('getIcon', () => {
+  it('returns null for undefined state', () => {
+    expect(getIcon(undefined)).toBeNull();
+  });
+
+  it.each([
+    ['SUCCEEDED', PipelineTaskTaskState.SUCCEEDED, 'CheckCircleIcon', 'bg-mui-green-50'],
+    ['RUNNING', PipelineTaskTaskState.RUNNING, 'RefreshIcon', 'bg-mui-green-50'],
+    ['FAILED', PipelineTaskTaskState.FAILED, 'ErrorIcon', 'bg-mui-red-50'],
+    ['SKIPPED', PipelineTaskTaskState.SKIPPED, 'StopCircleIcon', 'bg-mui-grey-200'],
+    ['CACHED', PipelineTaskTaskState.CACHED, 'CloudDownloadIcon', 'bg-mui-green-50'],
+    [
+      'UNSPECIFIED',
+      PipelineTaskTaskState.RUNTIME_STATE_UNSPECIFIED,
+      'MoreHorizIcon',
+      'bg-mui-grey-200',
+    ],
+  ] as const)(
+    'returns the correct icon for %s state',
+    (_label, state, iconTestId, backgroundClass) => {
+      render(getIcon(state)!);
+      const stateIcon = screen.getByTestId(iconTestId);
+      expect(stateIcon).toBeInTheDocument();
+      expect(stateIcon.parentElement).toHaveClass(backgroundClass);
+    },
+  );
+});
+
+describe('getExecutionIcon', () => {
+  it('returns a default ListAlt icon for undefined state', () => {
+    render(getExecutionIcon(undefined));
+    expect(screen.getByTestId('execution-icon-default')).toBeInTheDocument();
+  });
+
+  it('returns an active ListAlt icon for defined state', () => {
+    render(getExecutionIcon(PipelineTaskTaskState.RUNNING));
+    expect(screen.getByTestId('execution-icon-active')).toBeInTheDocument();
+  });
+});

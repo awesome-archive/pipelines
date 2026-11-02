@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,17 +14,11 @@
  * limitations under the License.
  */
 
-import * as React from 'react';
-import { shallow } from 'enzyme';
+import { fireEvent, render, waitFor } from '@testing-library/react';
 import ConfusionMatrix, { ConfusionMatrixConfig } from './ConfusionMatrix';
 import { PlotType } from './Viewer';
 
 describe('ConfusionMatrix', () => {
-  it('does not break on empty data', () => {
-    const tree = shallow(<ConfusionMatrix configs={[]} />);
-    expect(tree).toMatchSnapshot();
-  });
-
   const data = [
     [0, 1, 2],
     [3, 4, 5],
@@ -36,32 +30,116 @@ describe('ConfusionMatrix', () => {
     labels: ['label1', 'label2'],
     type: PlotType.CONFUSION_MATRIX,
   };
+
+  it('does not break on empty data', () => {
+    const { container } = render(<ConfusionMatrix configs={[]} />);
+    expect(container.firstChild).toBeNull();
+  });
+
   it('renders a basic confusion matrix', () => {
-    const tree = shallow(<ConfusionMatrix configs={[config]} />);
-    expect(tree).toMatchSnapshot();
+    const { asFragment } = render(<ConfusionMatrix configs={[config]} />);
+    expect(asFragment()).toMatchSnapshot();
   });
 
   it('does not break on asymetric data', () => {
-    const testConfig = {...config};
-    testConfig.data = data.slice(1);
-    const tree = shallow(<ConfusionMatrix configs={[testConfig]} />);
-    expect(tree).toMatchSnapshot();
+    const testConfig = { ...config, data: data.slice(1) };
+    const { asFragment } = render(<ConfusionMatrix configs={[testConfig]} />);
+    expect(asFragment()).toMatchSnapshot();
   });
 
   it('renders only one of the given list of configs', () => {
-    const tree = shallow(<ConfusionMatrix configs={[config, config, config]} />);
-    expect(tree).toMatchSnapshot();
+    const { asFragment } = render(<ConfusionMatrix configs={[config, config, config]} />);
+    expect(asFragment()).toMatchSnapshot();
   });
 
   it('renders a small confusion matrix snapshot, with no labels or footer', () => {
-    const tree = shallow(<ConfusionMatrix configs={[config]} maxDimension={100} />);
-    expect(tree).toMatchSnapshot();
+    const { asFragment } = render(<ConfusionMatrix configs={[config]} maxDimension={100} />);
+    expect(asFragment()).toMatchSnapshot();
+  });
+
+  it('keeps long column labels and the axis caption in the table flow', () => {
+    const labels = ['negative-class-with-a-long-name', 'positive class with a long name'];
+    const { container, getAllByRole, getByText } = render(
+      <ConfusionMatrix configs={[{ ...config, labels }]} />,
+    );
+    const columnLabels = getAllByRole('columnheader').filter(
+      (header) => header.getAttribute('scope') === 'col',
+    );
+
+    expect(columnLabels).toHaveLength(2);
+    columnLabels.forEach((header, index) => {
+      expect(header).toHaveTextContent(labels[index]);
+      expect(header).not.toHaveStyle('position: absolute');
+      expect(header.firstElementChild).toHaveStyle('overflow-wrap: anywhere; width: 79px');
+    });
+    const axisCaption = getByText(config.axes[0]);
+    expect(axisCaption).toHaveAttribute('colspan', '2');
+    expect(axisCaption.parentElement).toBe(container.querySelector('tbody')?.lastElementChild);
+    expect(axisCaption).not.toHaveStyle('position: absolute');
+  });
+
+  it('keeps distinct comparison values in the displayed matrix orientation', () => {
+    const { container, rerender } = render(
+      <ConfusionMatrix
+        configs={[
+          {
+            ...config,
+            data: [
+              [42, 8],
+              [3, 47],
+            ],
+          },
+        ]}
+      />,
+    );
+    const displayedValues = () =>
+      Array.from(container.querySelectorAll('td'))
+        .map((cell) => cell.textContent?.trim())
+        .filter((text) => text && /^\d+$/.test(text))
+        .map(Number);
+
+    expect(displayedValues()).toEqual([8, 47, 42, 3]);
+    rerender(
+      <ConfusionMatrix
+        configs={[
+          {
+            ...config,
+            data: [
+              [38, 12],
+              [7, 43],
+            ],
+          },
+        ]}
+      />,
+    );
+    expect(displayedValues()).toEqual([12, 43, 38, 7]);
   });
 
   it('activates row/column on cell hover', () => {
-    const tree = shallow(<ConfusionMatrix configs={[config]} />);
-    tree.find('td').at(2).simulate('mouseOver');
-    expect(tree.state()).toHaveProperty('activeCell', [0, 0]);
+    const { container } = render(<ConfusionMatrix configs={[config]} />);
+    const cells = container.querySelectorAll('td');
+    expect(cells.length).toBeGreaterThan(2);
+    const targetCell = cells[2];
+    fireEvent.mouseOver(targetCell);
+    const overlay = targetCell.querySelector('div');
+    expect(overlay).not.toBeNull();
+    expect(overlay).toHaveStyle('opacity: 0.05');
+  });
+
+  it('applies refreshed data without resetting the active cell', async () => {
+    const { container, rerender } = render(<ConfusionMatrix configs={[config]} />);
+    const targetCell = container.querySelectorAll('td')[2];
+    fireEvent.mouseOver(targetCell);
+
+    rerender(
+      <ConfusionMatrix
+        configs={[{ ...config, data: config.data.map((row) => row.map((value) => value + 10)) }]}
+      />,
+    );
+
+    await waitFor(() => expect(container.querySelectorAll('td')[2]).toHaveTextContent('11'));
+    const refreshedTarget = container.querySelectorAll('td')[2];
+    expect(refreshedTarget.querySelector('div')).toHaveStyle('opacity: 0.05');
   });
 
   it('returns a user friendly display name', () => {

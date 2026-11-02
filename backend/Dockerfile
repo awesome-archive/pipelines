@@ -1,60 +1,115 @@
-FROM golang:1.11-alpine3.7 as builder
+# Copyright 2021-2022 The Kubeflow Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
+# 1. Build api server application
+FROM golang:1.27.3-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS builder
 WORKDIR /go/src/github.com/kubeflow/pipelines
+
+COPY ./go.mod ./
+COPY ./go.sum ./
+COPY ./kubernetes_platform/go.mod ./kubernetes_platform/go.mod
+COPY ./api/go.mod ./api/go.mod
+
+# Fall back to fetching modules directly from source on any module proxy
+# error (the default comma separator only falls back on 404/410), so a
+# transient proxy.golang.org failure cannot fail the build.
+ENV GOPROXY=https://proxy.golang.org|direct
+RUN GO111MODULE=on go mod download
+RUN go list -mod=readonly -m -f '{{.Version}}' github.com/argoproj/argo-workflows/v4 > /tmp/argo-version
+
 COPY . .
-
-# Needed musl-dev for github.com/mattn/go-sqlite3
-RUN apk update && apk upgrade && \
-    apk add --no-cache bash git openssh gcc musl-dev
-
 RUN GO111MODULE=on go build -o /bin/apiserver backend/src/apiserver/*.go
 
-FROM python:3.5 as compiler
+# 2. Compile preloaded pipeline samples
+FROM python:3.14-slim AS compiler
+RUN apt-get update -y && apt-get install --no-install-recommends -y -q default-jdk python3-setuptools python3-dev jq wget curl protobuf-compiler make git
+RUN pip install uv
 
-RUN apt-get update -y && \
-    apt-get install --no-install-recommends -y -q default-jdk wget
+WORKDIR /workspace
+COPY pyproject.toml uv.lock ./
+COPY sdk/python ./sdk/python
+COPY kubernetes_platform/python ./kubernetes_platform/python
+COPY kubernetes_platform/proto ./kubernetes_platform/proto
+COPY api/Makefile ./api/Makefile
+COPY api/v2alpha1/python ./api/v2alpha1/python
+COPY api/v2alpha1/pipeline_spec.proto ./api/v2alpha1/pipeline_spec.proto
+# Ensure clean checkouts include generated pipeline spec Python module.
+RUN make -C api fetch-protos && \
+    python3 /workspace/api/v2alpha1/python/generate_proto.py && \
+    python3 /workspace/kubernetes_platform/python/generate_proto.py
+RUN uv sync --frozen --no-dev
+ENV PATH="/workspace/.venv/bin:$PATH"
 
-RUN pip3 install setuptools==40.5.0
+ARG TARGETARCH
+RUN echo "Building for architecture: ${TARGETARCH}"
 
-RUN wget http://central.maven.org/maven2/io/swagger/swagger-codegen-cli/2.3.1/swagger-codegen-cli-2.3.1.jar -O /tmp/swagger-codegen-cli.jar
+# Download the Argo CLI matching the runtime module so that the samples are
+# validated with the same release KFP builds against.
+COPY --from=builder /tmp/argo-version /tmp/argo-version
+RUN ARGO_VERSION="$(cat /tmp/argo-version)" && \
+    curl -fsSL -H "Accept: application/octet-stream" \
+        https://github.com/argoproj/argo-workflows/releases/download/${ARGO_VERSION}/argo-linux-$TARGETARCH.gz \
+    -o argo-linux-$TARGETARCH.gz && \
+    gunzip argo-linux-$TARGETARCH.gz && \
+    chmod +x argo-linux-$TARGETARCH && \
+    mv ./argo-linux-$TARGETARCH /usr/local/bin/argo
 
-WORKDIR /go/src/github.com/kubeflow/pipelines
-COPY . .
-WORKDIR /go/src/github.com/kubeflow/pipelines/sdk/python
-RUN ./build.sh /kfp.tar.gz
-RUN pip3 install /kfp.tar.gz
+WORKDIR /
+COPY ./samples /samples
+COPY backend/src/apiserver/config/sample_config.json /samples/
 
-WORKDIR /samples
-COPY ./samples .
+# Compiling the preloaded samples.
+# The default image is replaced with the GCR-hosted python image.
+RUN apt-get update && apt-get install -y jq
+RUN set -ex; \
+    echo "Checking sample_config.json"; \
+    cat /samples/sample_config.json; \
+    jq ".pipelines[].file" --raw-output /samples/sample_config.json | while read pipeline_yaml; do \
+    pipeline_py="${pipeline_yaml%.yaml}"; \
+    echo "Compiling: $pipeline_py"; \
+    python3 "$pipeline_py" || exit 1; \
+    echo "Checking output..."; \
+    ls "$pipeline_py.yaml" || exit 1; \
+    done
 
-#We need to check that all samples have been compiled without error.
-#For find program, the -exec argument is a filter predicate just like -name. It only affects whether the file is "found", not the find's exit code.
-#One way to solve this problem is to check whether we have any python pipelines that cannot compile. Here the exit code is the number of such files:
-#RUN  bash -e -c 'exit $(find . -maxdepth 2 -name "*.py" ! -exec dsl-compile --py {} --output {}.tar.gz \; -print | wc -l)'
-#I think it's better to just use a shell loop though.
-#RUN  for pipeline in $(find . -maxdepth 2 -name '*.py' -type f); do dsl-compile --py "$pipeline" --output "$pipeline.tar.gz"; done
-#The "for" loop breaks on all whitespace, so we either need to override IFS or use the "read" command instead.
-RUN  find . -maxdepth 2 -name '*.py' -type f | while read pipeline; do dsl-compile --py "$pipeline" --output "$pipeline.tar.gz"; done
-
-
-FROM alpine:3.8
+# 3. Start api web server
+FROM debian:stable-slim
 
 ARG COMMIT_SHA=unknown
 ENV COMMIT_SHA=${COMMIT_SHA}
+ARG TAG_NAME=unknown
+ENV TAG_NAME=${TAG_NAME}
+ENV LOG_LEVEL=info
 
 WORKDIR /bin
 
-COPY --from=builder /bin/apiserver /bin/apiserver
-COPY --from=builder /go/src/github.com/kubeflow/pipelines/third_party/license.txt /bin/license.txt
+# Adding CA certificate so API server can download pipeline through URL and wget is used for liveness/readiness probe command
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY backend/src/apiserver/config/ /config
+COPY --from=builder /bin/apiserver /bin/apiserver
 
 COPY --from=compiler /samples/ /samples/
+RUN chmod +x /bin/apiserver
 
-# Adding CA certificate so API server can download pipeline through URL
-RUN apk add ca-certificates
+# Pin sample doc links to the commit that built the backend image
+RUN sed -E "s#/(blob|tree)/master/#/\1/${COMMIT_SHA}/#g" -i /config/sample_config.json && \
+    sed -E "s/%252Fmaster/%252F${COMMIT_SHA}/#g" -i /config/sample_config.json
 
 # Expose apiserver port
 EXPOSE 8888
 
 # Start the apiserver
-CMD apiserver --config=/config --sampleconfig=/config/sample_config.json
+CMD ["/bin/sh", "-c", "/bin/apiserver --config=/config --sampleconfig=/config/sample_config.json -logtostderr=true --logLevel=${LOG_LEVEL}"]

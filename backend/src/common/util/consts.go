@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,7 +14,12 @@
 
 package util
 
-import constants "github.com/kubeflow/pipelines/backend/src/crd/pkg/apis/scheduledworkflow"
+import (
+	"os"
+	"strconv"
+
+	constants "github.com/kubeflow/pipelines/backend/src/crd/pkg/apis/scheduledworkflow"
+)
 
 const (
 	// LabelKeyScheduledWorkflowEnabled is a label on a ScheduledWorkflow.
@@ -24,8 +29,10 @@ const (
 	// It captures the status of the scheduled workflow.
 	LabelKeyScheduledWorkflowStatus = constants.FullName + "/status"
 
-	// The maximum byte sizes of the parameter column in package/pipeline DB.
-	MaxParameterBytes = 10000
+	// MaxParameterBytesEnvVar is the environment variable name for configuring max parameter bytes.
+	MaxParameterBytesEnvVar = "MAX_PARAMETER_BYTES"
+	// MaxMetricsFileBytesEnvVar configures the maximum uncompressed metrics artifact size.
+	MaxMetricsFileBytesEnvVar = "MAX_METRICS_FILE_BYTES"
 
 	// LabelKeyWorkflowEpoch is a label on a Workflow.
 	// It captures the epoch at which the workflow was scheduled.
@@ -39,4 +46,67 @@ const (
 	// LabelKeyWorkflowScheduledWorkflowName is a label on a Workflow.
 	// It captures whether the name of the owning ScheduledWorkflow.
 	LabelKeyWorkflowScheduledWorkflowName = constants.FullName + "/scheduledWorkflowName"
+
+	// V2ComponentKey marks IR-compiled workflow pod metadata in labels and annotations.
+	V2ComponentKey = "pipelines.kubeflow.org/v2_component"
+
+	LabelKeyWorkflowRunId               = "pipeline/runid"
+	LabelKeyWorkflowPersistedFinalState = "pipeline/persistedFinalState"
+
+	// LabelKeyWorkflowEpoch is a Workflow annotation key.
+	// It captures the the name of the Run.
+	AnnotationKeyRunName = "pipelines.kubeflow.org/run_name"
+
+	// AnnotationKeyRetryGeneration is stamped on a retried Workflow with the
+	// RetryGeneration claim token from ClaimRunForRetry. ReportWorkflowResource
+	// compares it against the run's current generation to fence terminal
+	// reports from stale pre-retry workflow snapshots.
+	AnnotationKeyRetryGeneration = "pipelines.kubeflow.org/retry-generation"
+
+	// AnnotationKeyTerminationReason and AnnotationKeyFailedImage are stamped
+	// on a Workflow that the persistence agent terminated because one of its
+	// pods could not pull its image. They describe a single attempt and are
+	// cleared when the run is retried.
+	AnnotationKeyTerminationReason = "pipelines.kubeflow.org/termination-reason"
+	AnnotationKeyFailedImage       = "pipelines.kubeflow.org/failed-image"
+	// TerminationReasonImagePullFailure is the AnnotationKeyTerminationReason
+	// value set for image pull failures.
+	TerminationReasonImagePullFailure = "ImagePullFailure"
+
+	AnnotationKeyIstioSidecarInject           = "sidecar.istio.io/inject"
+	AnnotationValueIstioSidecarInjectEnabled  = "true"
+	AnnotationValueIstioSidecarInjectDisabled = "false"
+
+	// AnnotationKeyRuntimeRole is set on compiled Argo Workflow templates to
+	// identify the logical role of the pod (driver, launcher, etc.).  It is
+	// used by UpsertRuntimeConfig to target the right containers.
+	AnnotationKeyRuntimeRole = "pipelines.kubeflow.org/runtime-role"
 )
+
+// GetMaxParameterBytes returns the maximum byte size of parameters.
+// It reads from the MAX_PARAMETER_BYTES environment variable, defaulting to 10000.
+func GetMaxParameterBytes() int {
+	defaultMaxParameterBytes := 10000
+	if envVal := os.Getenv(MaxParameterBytesEnvVar); envVal != "" {
+		if val, err := strconv.Atoi(envVal); err == nil && val > 0 {
+			return val
+		}
+	}
+	return defaultMaxParameterBytes
+}
+
+// GetMaxMetricsFileBytes returns the maximum uncompressed byte size of a
+// metrics artifact. One MiB comfortably exceeds the meaningful payload for 50
+// scalar metrics while bounding pathological JSON whitespace and encoding.
+func GetMaxMetricsFileBytes() int64 {
+	const defaultMaxMetricsFileBytes int64 = 1 << 20
+	if envValue := os.Getenv(MaxMetricsFileBytesEnvVar); envValue != "" {
+		if value, err := strconv.ParseInt(envValue, 10, 64); err == nil && value > 0 {
+			return value
+		}
+	}
+	return defaultMaxMetricsFileBytes
+}
+
+// MaxParameterBytes is the maximum byte size of the parameter column in package/pipeline DB.
+var MaxParameterBytes = GetMaxParameterBytes()

@@ -1,12 +1,29 @@
 {
   "DBConfig": {
-    "DriverName": "mysql",
-    "DataSourceName": ""
+    "MySQLConfig": {
+      "DataSourceName": "",
+      "DBName": "mlpipeline",
+      "GroupConcatMaxLen": "4194304"
+    },
+    "PostgreSQLConfig": {
+      "DBName": "mlpipeline",
+      "ExtraParams": {}
+    },
+    "ConMaxLifeTime": "120s"
   },
-  "ObjectStoreConfig":{
+  "ObjectStoreConfig": {
     "AccessKey": "minio",
     "SecretAccessKey": "minio123",
-    "BucketName": "mlpipeline"
+    "BucketName": "mlpipeline",
+    "PipelinePath": "pipelines"
   },
-  "InitConnectionTimeout": "6m"
+  "DBDriverName": "mysql",
+  "ARCHIVE_CONFIG_LOG_FILE_NAME": "main.log",
+  "ARCHIVE_CONFIG_LOG_PATH_PREFIX": "/artifacts",
+  "InitConnectionTimeout": "6m",
+  "DEFAULTPIPELINERUNNERSERVICEACCOUNT": "pipeline-runner",
+  "CacheEnabled": "true",
+  "CRON_SCHEDULE_TIMEZONE": "UTC",
+  "CACHE_IMAGE": "ghcr.io/containerd/busybox",
+  "CACHE_NODE_RESTRICTIONS": "false"
 }

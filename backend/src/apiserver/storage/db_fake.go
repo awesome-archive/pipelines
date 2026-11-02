@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,37 +15,41 @@
 package storage
 
 import (
-	"fmt"
+	"database/sql"
 
 	"github.com/golang/glog"
-	"github.com/jinzhu/gorm"
+	"github.com/kubeflow/pipelines/backend/src/apiserver/common/sql/dialect"
 	"github.com/kubeflow/pipelines/backend/src/apiserver/model"
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/kubeflow/pipelines/backend/src/common/util"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
-func NewFakeDb() (*DB, error) {
+// NewFakeDB creates an in-memory SQLite database for tests and returns
+// the raw *sql.DB along with a dialect.DBDialect configured for SQLite.
+func NewFakeDB() (*sql.DB, dialect.DBDialect, error) {
 	// Initialize GORM
-	db, err := gorm.Open("sqlite3", ":memory:")
+	dbInstance, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
-		return nil, fmt.Errorf("Could not create the GORM database: %v", err)
+		return nil, nil, util.Wrap(err, "Could not create the GORM database")
 	}
 	// Create tables
-	db.AutoMigrate(
-		&model.Experiment{},
-		&model.Job{},
-		&model.Pipeline{},
-		&model.ResourceReference{},
-		&model.RunDetail{},
-		&model.RunMetric{},
-		&model.DBStatus{})
+	if err := dbInstance.AutoMigrate(model.AllModels()...); err != nil {
+		return nil, nil, util.Wrap(err, "Failed to automigrate models")
+	}
 
-	return NewDB(db.DB(), NewSQLiteDialect()), nil
+	sqlDB, err := dbInstance.DB()
+	if err != nil {
+		return nil, nil, util.Wrap(err, "Failed to get generic database object from GORM DB")
+	}
+	return sqlDB, dialect.NewDBDialect("sqlite"), nil
 }
 
-func NewFakeDbOrFatal() *DB {
-	db, err := NewFakeDb()
+// NewFakeDBOrFatal is a convenience for tests that prefer fatal on setup error.
+func NewFakeDBOrFatal() (*sql.DB, dialect.DBDialect) {
+	db, dbDialect, err := NewFakeDB()
 	if err != nil {
 		glog.Fatalf("The fake DB doesn't create successfully. Fail fast.")
 	}
-	return db
+	return db, dbDialect
 }

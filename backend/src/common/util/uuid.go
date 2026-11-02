@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,10 +23,21 @@ type UUIDGeneratorInterface interface {
 	NewRandom() (uuid.UUID, error)
 }
 
+// deterministicUUIDNamespace is a fixed namespace UUID used to derive stable
+// (version 5) UUIDs from a name. It must never change; otherwise previously
+// generated deterministic UUIDs would no longer match.
+var deterministicUUIDNamespace = uuid.MustParse("c2f3a9d4-1e6b-4c8a-9f7d-0b5e3a1c2d4f")
+
+// NewDeterministicUUID returns a stable UUID derived from the given name.
+// Repeated calls with the same name always return the same UUID, which lets
+// concurrent callers converge on a single primary key for idempotent inserts.
+func NewDeterministicUUID(name string) string {
+	return uuid.NewSHA1(deterministicUUIDNamespace, []byte(name)).String()
+}
+
 // UUIDGenerator is the concrete implementation of the UUIDGeneratorInterface used to
 // generate UUIDs in production deployments.
-type UUIDGenerator struct {
-}
+type UUIDGenerator struct{}
 
 func NewUUIDGenerator() *UUIDGenerator {
 	return &UUIDGenerator{}
@@ -45,7 +56,7 @@ type FakeUUIDGenerator struct {
 
 // NewFakeUUIDGeneratorOrFatal creates a UUIDGenerator that always returns the UUID and error
 // provided as parameters.
-func NewFakeUUIDGeneratorOrFatal(uuidStringToReturn string, errToReturn error) *FakeUUIDGenerator {
+func NewFakeUUIDGeneratorOrFatal(uuidStringToReturn string, errToReturn error) UUIDGeneratorInterface {
 	uuidToReturn, err := uuid.Parse(uuidStringToReturn)
 	if err != nil {
 		glog.Fatalf("Could not parse the UUID %v: %+v", uuidStringToReturn, err)

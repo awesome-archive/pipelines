@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the 'License');
  * you may not use this file except in compliance with the License.
@@ -14,21 +14,33 @@
  * limitations under the License.
  */
 
+import { NavigationProps } from 'src/lib/Navigation';
 import * as React from 'react';
-import { RouteComponentProps } from 'react-router';
+
 import { ToolbarProps } from '../components/Toolbar';
 import { BannerProps } from '../components/Banner';
-import { SnackbarProps } from '@material-ui/core/Snackbar';
+import { SnackbarProps } from '@mui/material/Snackbar';
 import { DialogProps } from '../components/Router';
 import { errorToMessage } from '../lib/Utils';
 
-export interface PageProps extends RouteComponentProps {
+/**
+ * Route params are read by RouteParams key (see src/components/Router.tsx), so
+ * the params bag is indexed by string rather than by a fixed set of keys.
+ */
+export interface PageProps extends NavigationProps<{ [param: string]: string | undefined }> {
   toolbarProps: ToolbarProps;
   updateBanner: (bannerProps: BannerProps) => void;
   updateDialog: (dialogProps: DialogProps) => void;
   updateSnackbar: (snackbarProps: SnackbarProps) => void;
   updateToolbar: (toolbarProps: Partial<ToolbarProps>) => void;
 }
+
+export type PageErrorHandler = (
+  message: string,
+  error?: unknown,
+  mode?: 'error' | 'warning',
+  refresh?: () => Promise<void>,
+) => Promise<void>;
 
 export abstract class Page<P, S> extends React.Component<P & PageProps, S> {
   protected _isMounted = true;
@@ -38,7 +50,7 @@ export abstract class Page<P, S> extends React.Component<P & PageProps, S> {
     this.props.updateToolbar(this.getInitialToolbarState());
   }
 
-  public abstract render(): JSX.Element;
+  public abstract render(): React.JSX.Element;
 
   public abstract getInitialToolbarState(): ToolbarProps;
 
@@ -49,21 +61,35 @@ export abstract class Page<P, S> extends React.Component<P & PageProps, S> {
     this._isMounted = false;
   }
 
+  public componentDidMount(): void {
+    this._isMounted = true;
+    this.clearBanner();
+  }
+
   public clearBanner(): void {
+    if (!this._isMounted) {
+      return;
+    }
     this.props.updateBanner({});
   }
 
-  public async showPageError(message: string, error?: Error, mode?: 'error' | 'warning'): Promise<void> {
+  public showPageError: PageErrorHandler = async (message, error, mode, refresh): Promise<void> => {
     const errorMessage = await errorToMessage(error);
+    if (!this._isMounted) {
+      return;
+    }
     this.props.updateBanner({
       additionalInfo: errorMessage ? errorMessage : undefined,
       message: message + (errorMessage ? ' Click Details for more information.' : ''),
       mode: mode || 'error',
-      refresh: this.refresh.bind(this),
+      refresh: refresh || this.refresh.bind(this),
     });
-  }
+  };
 
   public showErrorDialog(title: string, content: string): void {
+    if (!this._isMounted) {
+      return;
+    }
     this.props.updateDialog({
       buttons: [{ text: 'Dismiss' }],
       content,

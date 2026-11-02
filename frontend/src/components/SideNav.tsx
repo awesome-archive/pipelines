@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,61 +14,71 @@
  * limitations under the License.
  */
 
+import ArtifactsIcon from '@mui/icons-material/BubbleChart';
+import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
+import JupyterhubIcon from '@mui/icons-material/Code';
+import DescriptionIcon from '@mui/icons-material/Description';
+import OpenInNewIcon from '@mui/icons-material/OpenInNew';
+import DirectionsRun from '@mui/icons-material/DirectionsRun';
 import * as React from 'react';
-import Button from '@material-ui/core/Button';
-import ChevronLeftIcon from '@material-ui/icons/ChevronLeft';
-import ExperimentsIcon from '../icons/experiments';
-import IconButton from '@material-ui/core/IconButton';
-import JupyterhubIcon from '@material-ui/icons/Code';
-import KubeflowLogo from '../icons/kubeflowLogo';
-import OpenInNewIcon from '@material-ui/icons/OpenInNew';
-import PipelinesIcon from '../icons/pipelines';
-import Tooltip from '@material-ui/core/Tooltip';
-import { Apis } from '../lib/Apis';
-import { Link } from 'react-router-dom';
-import { LocalStorage, LocalStorageKey } from '../lib/LocalStorage';
-import { RoutePage } from '../components/Router';
-import { RouterProps } from 'react-router';
+import { Link } from 'react-router';
 import { classes, stylesheet } from 'typestyle';
-import { fontsize, dimension, commonCss } from '../Css';
-import { logger } from '../lib/Utils';
+import { ExternalLinks, RoutePage, RoutePrefix } from '../components/Router';
+import { commonCss, fontsize } from '../Css';
+import ExperimentsIcon from '../icons/experiments';
+import GitHubIcon from '../icons/GitHub-Mark-120px-plus.png';
+import PipelinesIcon from '../icons/pipelines';
+import { BuildInfo } from '../lib/Apis';
+import { Deployments, KFP_FLAGS } from '../lib/Flags';
+import { LocalStorage, LocalStorageKey } from '../lib/LocalStorage';
+import { GkeMetadataContext, GkeMetadata } from 'src/lib/GkeMetadata';
+import { Alarm } from '@mui/icons-material';
+import { BuildInfoContext } from 'src/lib/BuildInfo';
+
+import { Button, IconButton, Tooltip } from '@mui/material';
+
+export const tailwindcss = {
+  sideNavItem: 'flex flex-row flex-shrink-0',
+};
 
 export const sideNavColors = {
-  bg: '#0f4471',
-  fgActive: '#fff',
+  bg: '#f8fafb',
+  fgActive: '#0d6de7',
   fgActiveInvisible: 'rgb(227, 233, 237, 0)',
-  fgDefault: '#87a1b8',
-  hover: '#3f698d',
-  separator: '#41698d',
+  fgDefault: '#9aa0a6',
+  hover: '#f1f3f4',
+  separator: '#bdc1c6',
+  sideNavBorder: '#e8eaed',
 };
+
+const COLLAPSED_SIDE_NAV_SIZE = 72;
+const EXPANDED_SIDE_NAV_SIZE = 220;
 
 export const css = stylesheet({
   active: {
-    backgroundColor: sideNavColors.hover + ' !important',
     color: sideNavColors.fgActive + ' !important',
   },
-  buildInfo: {
-    color: sideNavColors.fgDefault,
-    marginBottom: 16,
-    marginLeft: 30,
-  },
   button: {
-    borderRadius: dimension.base / 2,
+    $nest: {
+      '&::hover': {
+        backgroundColor: sideNavColors.hover,
+      },
+    },
+    borderRadius: 0,
     color: sideNavColors.fgDefault,
     display: 'block',
     fontSize: fontsize.medium,
     fontWeight: 'bold',
-    height: dimension.base,
+    height: 44,
     marginBottom: 16,
-    marginLeft: 16,
-    maxWidth: 186,
+    maxWidth: EXPANDED_SIDE_NAV_SIZE,
     overflow: 'hidden',
-    padding: 10,
+    padding: '12px 10px 10px 26px',
     textAlign: 'left',
     textTransform: 'none',
     transition: 'max-width 0.3s',
     whiteSpace: 'nowrap',
-    width: 186,
+    width: EXPANDED_SIDE_NAV_SIZE,
   },
   chevron: {
     color: sideNavColors.fgDefault,
@@ -77,32 +87,67 @@ export const css = stylesheet({
     transition: 'transform 0.3s',
   },
   collapsedButton: {
-    maxWidth: dimension.base,
-    minWidth: dimension.base,
-    padding: 10,
+    maxWidth: COLLAPSED_SIDE_NAV_SIZE,
+    minWidth: COLLAPSED_SIDE_NAV_SIZE,
+    padding: '12px 10px 10px 26px',
   },
   collapsedChevron: {
     transform: 'rotate(180deg)',
+  },
+  collapsedExternalLabel: {
+    // Hide text when collapsing, but do it with a transition of both height and
+    // opacity
+    height: 0,
+    opacity: 0,
   },
   collapsedLabel: {
     // Hide text when collapsing, but do it with a transition
     opacity: 0,
   },
   collapsedRoot: {
-    width: '72px !important',
+    width: `${COLLAPSED_SIDE_NAV_SIZE}px !important`,
   },
   collapsedSeparator: {
     margin: '20px !important',
+  },
+  envMetadata: {
+    color: sideNavColors.fgDefault,
+    marginBottom: 16,
+    marginLeft: 30,
+  },
+  icon: {
+    height: 20,
+    width: 20,
+  },
+  iconImage: {
+    opacity: 0.6, // Images are too colorful there by default, reduce their color.
+  },
+  indicator: {
+    borderBottom: '3px solid transparent',
+    borderLeft: `3px solid ${sideNavColors.fgActive}`,
+    borderTop: '3px solid transparent',
+    height: 42,
+    left: 0,
+    position: 'absolute',
+    zIndex: 1,
+  },
+  indicatorHidden: {
+    opacity: 0,
   },
   infoHidden: {
     opacity: 0,
     transition: 'opacity 0s',
     transitionDelay: '0s',
+    // guarantees info doesn't affect layout when hidden
+    overflow: 'hidden',
+    height: 0,
   },
   infoVisible: {
+    flexShrink: 0,
     opacity: 'initial',
     transition: 'opacity 0.2s',
     transitionDelay: '0.3s',
+    overflow: 'hidden',
   },
   label: {
     fontSize: fontsize.base,
@@ -112,21 +157,7 @@ export const css = stylesheet({
     verticalAlign: 'super',
   },
   link: {
-    color: '#b7d1e8'
-  },
-  logo: {
-    display: 'flex',
-    marginBottom: 16,
-    marginLeft: '9px !important',
-
-  },
-  logoLabel: {
-    color: sideNavColors.fgActive,
-    display: 'flex',
-    flexDirection: 'column',
-    fontSize: fontsize.title,
-    justifyContent: 'center',
-    marginLeft: 12,
+    color: '#77abda',
   },
   openInNewTabIcon: {
     height: 12,
@@ -134,26 +165,12 @@ export const css = stylesheet({
     marginLeft: 5,
     width: 12,
   },
-  privacyInfo: {
-    color: sideNavColors.fgDefault,
-    marginBottom: 6,
-    marginLeft: 30,
-  },
-  privacySeparator: {
-    background: sideNavColors.fgDefault,
-    borderRadius: 2,
-    display: 'inline-block',
-    height: 4,
-    marginBottom: 3,
-    marginLeft: 10,
-    marginRight: 10,
-    width: 4,
-  },
   root: {
     background: sideNavColors.bg,
-    paddingTop: 12,
+    borderRight: `1px ${sideNavColors.sideNavBorder} solid`,
+    paddingTop: 15,
     transition: 'width 0.3s',
-    width: 220,
+    width: EXPANDED_SIDE_NAV_SIZE,
   },
   separator: {
     border: '0px none transparent',
@@ -166,23 +183,52 @@ interface DisplayBuildInfo {
   commitHash: string;
   commitUrl: string;
   date: string;
+  tagName: string;
 }
 
-interface SideNavProps extends RouterProps {
+interface SideNavProps {
   page: string;
 }
 
+interface SideNavInternalProps extends SideNavProps {
+  gkeMetadata: GkeMetadata;
+  buildInfo: BuildInfo | undefined;
+}
+
 interface SideNavState {
-  displayBuildInfo?: DisplayBuildInfo;
   collapsed: boolean;
   jupyterHubAvailable: boolean;
   manualCollapseState: boolean;
 }
 
-export default class SideNav extends React.Component<SideNavProps, SideNavState> {
+type SideNavButtonProps = Omit<
+  React.ComponentPropsWithoutRef<typeof Button>,
+  'children' | 'color'
+> & {
+  children: React.ReactNode;
+  collapsed: boolean;
+};
+
+const SideNavButton: React.FC<SideNavButtonProps> = ({
+  children,
+  collapsed,
+  className,
+  ...buttonProps
+}) => (
+  <Button
+    {...buttonProps}
+    color='inherit'
+    className={classes(css.button, className, collapsed && css.collapsedButton)}
+  >
+    {children}
+  </Button>
+);
+
+export class SideNav extends React.Component<SideNavInternalProps, SideNavState> {
   private _isMounted = true;
   private readonly _AUTO_COLLAPSE_WIDTH = 800;
   private readonly _HUB_ADDRESS = '/hub/';
+  private readonly _boundMaybeResize = this._maybeResize.bind(this);
 
   constructor(props: any) {
     super(props);
@@ -191,151 +237,403 @@ export default class SideNav extends React.Component<SideNavProps, SideNavState>
 
     this.state = {
       collapsed,
+      // Set jupyterHubAvailable to false so UI don't show Jupyter Hub link
       jupyterHubAvailable: false,
       manualCollapseState: LocalStorage.hasKey(LocalStorageKey.navbarCollapsed),
     };
   }
 
   public async componentDidMount(): Promise<void> {
-    window.addEventListener('resize', this._maybeResize.bind(this));
+    this._isMounted = true;
+    window.addEventListener('resize', this._boundMaybeResize);
     this._maybeResize();
-
-    // Fetch build info
-    let displayBuildInfo: DisplayBuildInfo | undefined;
-    try {
-      const buildInfo = await Apis.getBuildInfo();
-      const commitHash = buildInfo.apiServerCommitHash || buildInfo.frontendCommitHash || '';
-      displayBuildInfo = {
-        commitHash: commitHash ? commitHash.substring(0, 7) : 'unknown',
-        commitUrl: 'https://www.github.com/kubeflow/pipelines'
-          + (commitHash ? `/commit/${commitHash}` : ''),
-        date: buildInfo.buildDate ? new Date(buildInfo.buildDate).toLocaleDateString() : 'unknown',
-      };
-    } catch (err) {
-      logger.error('Failed to retrieve build info', err);
-    }
-
-    // Verify Jupyter Hub is reachable
-    let jupyterHubAvailable = false;
-    try {
-      jupyterHubAvailable = await Apis.isJupyterHubAvailable();
-    } catch (err) {
-      logger.error('Failed to reach Jupyter Hub', err);
-    }
-
-    this.setStateSafe({ displayBuildInfo, jupyterHubAvailable });
   }
 
   public componentWillUnmount(): void {
     this._isMounted = false;
+    window.removeEventListener('resize', this._boundMaybeResize);
   }
 
-  public render(): JSX.Element {
+  public render(): React.JSX.Element | null {
     const page = this.props.page;
-    const { collapsed, displayBuildInfo } = this.state;
+    const displayBuildInfo: DisplayBuildInfo = this._getBuildInfo();
+    const { collapsed } = this.state;
+    const { gkeMetadata } = this.props;
     const iconColor = {
       active: sideNavColors.fgActive,
       inactive: sideNavColors.fgDefault,
     };
 
+    if (KFP_FLAGS.HIDE_SIDENAV) {
+      return null;
+    }
+
     return (
-      <div id='sideNav' className={classes(css.root, commonCss.flexColumn, commonCss.noShrink, collapsed && css.collapsedRoot)}>
-        <div style={{ flexGrow: 1 }}>
-          <Tooltip title={'Kubeflow Pipelines'} enterDelay={300} placement={'right'}
-            disableFocusListener={!collapsed} disableHoverListener={!collapsed}
-            disableTouchListener={!collapsed}>
-            <Link id='kfpLogoBtn' to={RoutePage.PIPELINES} className={classes(css.button, collapsed && css.collapsedButton, css.logo, commonCss.unstyled)}>
-              <KubeflowLogo color={iconColor.active} style={{ flexShrink: 0 }} />
-              <span className={classes(collapsed && css.collapsedLabel, css.label, css.logoLabel)}>
-                Kubeflow
-              </span>
-            </Link>
-          </Tooltip>
-          <Tooltip title={'Pipeline List'} enterDelay={300} placement={'right-start'}
-            disableFocusListener={!collapsed} disableHoverListener={!collapsed}
-            disableTouchListener={!collapsed}>
+      <div
+        id='sideNav'
+        data-testid='sideNav'
+        className={classes(
+          css.root,
+          commonCss.flexColumn,
+          commonCss.noShrink,
+          collapsed && css.collapsedRoot,
+        )}
+      >
+        <div
+          style={{
+            flexGrow: 1,
+            minHeight: 0,
+            overflowX: 'hidden',
+            overflowY: 'auto',
+            position: 'relative',
+          }}
+        >
+          {KFP_FLAGS.DEPLOYMENT === Deployments.MARKETPLACE && (
+            <>
+              <div
+                className={classes(
+                  css.indicator,
+                  !page.startsWith(RoutePage.START) && css.indicatorHidden,
+                )}
+              />
+              <Tooltip
+                title={'Getting Started'}
+                enterDelay={300}
+                placement={'right-start'}
+                disableFocusListener={!collapsed}
+                disableHoverListener={!collapsed}
+                disableTouchListener={!collapsed}
+              >
+                <Link id='gettingStartedBtn' to={RoutePage.START} className={commonCss.unstyled}>
+                  <SideNavButton
+                    collapsed={collapsed}
+                    className={page.startsWith(RoutePage.START) ? css.active : undefined}
+                  >
+                    <div className={tailwindcss.sideNavItem}>
+                      <DescriptionIcon style={{ width: 20, height: 20 }} />
+                      <span className={classes(collapsed && css.collapsedLabel, css.label)}>
+                        Getting Started
+                      </span>
+                    </div>
+                  </SideNavButton>
+                </Link>
+              </Tooltip>
+            </>
+          )}
+          <div
+            className={classes(
+              css.indicator,
+              !this._highlightPipelinesButton(page) && css.indicatorHidden,
+            )}
+          />
+          <Tooltip
+            title={'Pipeline List'}
+            enterDelay={300}
+            placement={'right-start'}
+            disableFocusListener={!collapsed}
+            disableHoverListener={!collapsed}
+            disableTouchListener={!collapsed}
+          >
             <Link id='pipelinesBtn' to={RoutePage.PIPELINES} className={commonCss.unstyled}>
-              <Button className={classes(css.button,
-                page.startsWith(RoutePage.PIPELINES) && css.active,
-                collapsed && css.collapsedButton)}>
-                <PipelinesIcon color={page.startsWith(RoutePage.PIPELINES) ? iconColor.active : iconColor.inactive} />
-                <span className={classes(collapsed && css.collapsedLabel, css.label)}>Pipelines</span>
-              </Button>
+              <SideNavButton
+                collapsed={collapsed}
+                className={this._highlightPipelinesButton(page) ? css.active : undefined}
+              >
+                <div className={tailwindcss.sideNavItem}>
+                  <div className={classes({ alignItems: 'stretch' })}>
+                    <PipelinesIcon
+                      color={
+                        this._highlightPipelinesButton(page) ? iconColor.active : iconColor.inactive
+                      }
+                    />
+                  </div>
+                  <span className={classes(collapsed && css.collapsedLabel, css.label)}>
+                    Pipelines
+                  </span>
+                </div>
+              </SideNavButton>
             </Link>
           </Tooltip>
-          <Tooltip title={'Experiment List'} enterDelay={300} placement={'right-start'}
-            disableFocusListener={!collapsed} disableHoverListener={!collapsed}
-            disableTouchListener={!collapsed}>
+          <div
+            className={classes(
+              css.indicator,
+              !this._highlightExperimentsButton(page) && css.indicatorHidden,
+            )}
+          />
+          <Tooltip
+            title={'Experiment List'}
+            enterDelay={300}
+            placement={'right-start'}
+            disableFocusListener={!collapsed}
+            disableHoverListener={!collapsed}
+            disableTouchListener={!collapsed}
+          >
             <Link id='experimentsBtn' to={RoutePage.EXPERIMENTS} className={commonCss.unstyled}>
-              <Button className={
-                classes(
-                  css.button,
-                  this._highlightExperimentsButton(page) && css.active,
-                  collapsed && css.collapsedButton)}>
-                <ExperimentsIcon color={this._highlightExperimentsButton(page) ? iconColor.active : iconColor.inactive} />
-                <span className={classes(collapsed && css.collapsedLabel, css.label)}>Experiments</span>
-              </Button>
+              <SideNavButton
+                collapsed={collapsed}
+                className={this._highlightExperimentsButton(page) ? css.active : undefined}
+              >
+                <div className={tailwindcss.sideNavItem}>
+                  <div className={classes({ alignItems: 'stretch' })}>
+                    <ExperimentsIcon
+                      color={
+                        this._highlightExperimentsButton(page)
+                          ? iconColor.active
+                          : iconColor.inactive
+                      }
+                    />
+                  </div>
+                  <span className={classes(collapsed && css.collapsedLabel, css.label)}>
+                    Experiments
+                  </span>
+                </div>
+              </SideNavButton>
+            </Link>
+          </Tooltip>
+          <div
+            className={classes(
+              css.indicator,
+              !this._highlightRunsButton(page) && css.indicatorHidden,
+            )}
+          />
+          <Tooltip
+            title={'Runs List'}
+            enterDelay={300}
+            placement={'right-start'}
+            disableFocusListener={!collapsed}
+            disableHoverListener={!collapsed}
+            disableTouchListener={!collapsed}
+          >
+            <Link id='runsBtn' to={RoutePage.RUNS} className={commonCss.unstyled}>
+              <SideNavButton
+                collapsed={collapsed}
+                className={this._highlightRunsButton(page) ? css.active : undefined}
+              >
+                <div className={tailwindcss.sideNavItem}>
+                  <DirectionsRun />
+                  <span className={classes(collapsed && css.collapsedLabel, css.label)}>Runs</span>
+                </div>
+              </SideNavButton>
+            </Link>
+          </Tooltip>
+          <div
+            className={classes(
+              css.indicator,
+              !this._highlightRecurringRunsButton(page) && css.indicatorHidden,
+            )}
+          />
+          <Tooltip
+            title={'Recurring Runs List'}
+            enterDelay={300}
+            placement={'right-start'}
+            disableFocusListener={!collapsed}
+            disableHoverListener={!collapsed}
+            disableTouchListener={!collapsed}
+          >
+            <Link
+              id='recurringRunsBtn'
+              to={RoutePage.RECURRING_RUNS}
+              className={commonCss.unstyled}
+            >
+              <SideNavButton
+                collapsed={collapsed}
+                className={this._highlightRecurringRunsButton(page) ? css.active : undefined}
+              >
+                <div className={tailwindcss.sideNavItem}>
+                  <Alarm />
+                  <span className={classes(collapsed && css.collapsedLabel, css.label)}>
+                    Recurring Runs
+                  </span>
+                </div>
+              </SideNavButton>
+            </Link>
+          </Tooltip>
+          <div
+            className={classes(
+              css.indicator,
+              !this._highlightArtifactsButton(page) && css.indicatorHidden,
+            )}
+          />
+          <Tooltip
+            title={'Artifacts List'}
+            enterDelay={300}
+            placement={'right-start'}
+            disableFocusListener={!collapsed}
+            disableHoverListener={!collapsed}
+            disableTouchListener={!collapsed}
+          >
+            <Link id='artifactsBtn' to={RoutePage.ARTIFACTS} className={commonCss.unstyled}>
+              <SideNavButton
+                collapsed={collapsed}
+                className={this._highlightArtifactsButton(page) ? css.active : undefined}
+              >
+                <div className={tailwindcss.sideNavItem}>
+                  <ArtifactsIcon />
+                  <span className={classes(collapsed && css.collapsedLabel, css.label)}>
+                    Artifacts
+                  </span>
+                </div>
+              </SideNavButton>
             </Link>
           </Tooltip>
           {this.state.jupyterHubAvailable && (
-            <Tooltip title={'Open Jupyter Notebook'} enterDelay={300} placement={'right-start'}
-              disableFocusListener={!collapsed} disableHoverListener={!collapsed}
-              disableTouchListener={!collapsed}>
-              <a id='jupyterhubBtn' href={this._HUB_ADDRESS} className={commonCss.unstyled} target='_blank'>
-                <Button className={
-                  classes(css.button, collapsed && css.collapsedButton)}>
-                  <JupyterhubIcon style={{ height: 20, width: 20 }} />
-                  <span className={classes(collapsed && css.collapsedLabel, css.label)}>Notebooks</span>
-                  <OpenInNewIcon className={css.openInNewTabIcon} />
-                </Button>
+            <Tooltip
+              title={'Open Jupyter Notebook'}
+              enterDelay={300}
+              placement={'right-start'}
+              disableFocusListener={!collapsed}
+              disableHoverListener={!collapsed}
+              disableTouchListener={!collapsed}
+            >
+              <a
+                id='jupyterhubBtn'
+                href={this._HUB_ADDRESS}
+                className={commonCss.unstyled}
+                target='_blank'
+                rel='noopener'
+              >
+                <SideNavButton collapsed={collapsed}>
+                  <div className={tailwindcss.sideNavItem}>
+                    <JupyterhubIcon style={{ height: 20, width: 20 }} />
+                    <span className={classes(collapsed && css.collapsedLabel, css.label)}>
+                      Notebooks
+                    </span>
+                    <OpenInNewIcon className={css.openInNewTabIcon} />
+                  </div>
+                </SideNavButton>
               </a>
             </Tooltip>
           )}
           <hr className={classes(css.separator, collapsed && css.collapsedSeparator)} />
-          <IconButton className={classes(css.chevron, collapsed && css.collapsedChevron)}
-            onClick={this._toggleNavClicked.bind(this)}>
+          <ExternalUri
+            title={'Documentation'}
+            to={ExternalLinks.DOCUMENTATION}
+            collapsed={collapsed}
+            icon={(className) => <DescriptionIcon className={className} />}
+          />
+          <ExternalUri
+            title={'Github Repo'}
+            to={ExternalLinks.GITHUB}
+            collapsed={collapsed}
+            icon={(className) => (
+              <img src={GitHubIcon} className={classes(className, css.iconImage)} alt='Github' />
+            )}
+          />
+          <hr className={classes(css.separator, collapsed && css.collapsedSeparator)} />
+          <IconButton
+            className={classes(css.chevron, collapsed && css.collapsedChevron)}
+            onClick={this._toggleNavClicked.bind(this)}
+            aria-label={collapsed ? 'Expand navigation' : 'Collapse navigation'}
+            data-testid='chevron-toggle'
+            size='large'
+          >
             <ChevronLeftIcon />
           </IconButton>
         </div>
         <div className={collapsed ? css.infoHidden : css.infoVisible}>
-          <div className={css.privacyInfo}>
-            <span>Privacy</span>
-            <span className={css.privacySeparator}/>
-            <a href='https://www.kubeflow.org/docs/guides/usage-reporting/'
-              className={classes(css.link, commonCss.unstyled)} target='_blank'>
-              Usage reporting
-            </a>
-          </div>
-          {displayBuildInfo && (
-            <Tooltip title={'Build date: ' + displayBuildInfo.date} enterDelay={300} placement={'top-start'}>
-              <div className={css.buildInfo}>
-                <span>Build commit: </span>
-                <a href={displayBuildInfo.commitUrl} className={classes(css.link, commonCss.unstyled)}
-                  target='_blank'>
-                  {displayBuildInfo.commitHash}
+          {gkeMetadata.clusterName && gkeMetadata.projectId && (
+            <Tooltip
+              title={`Cluster name: ${gkeMetadata.clusterName}, Project ID: ${gkeMetadata.projectId}`}
+              enterDelay={300}
+              placement='top-start'
+            >
+              <div className={css.envMetadata}>
+                <span>Cluster name: </span>
+                <a
+                  href={`https://console.cloud.google.com/kubernetes/list?project=${gkeMetadata.projectId}&filter=name:${gkeMetadata.clusterName}`}
+                  className={classes(css.link, commonCss.unstyled)}
+                  rel='noopener'
+                  target='_blank'
+                >
+                  {gkeMetadata.clusterName}
                 </a>
               </div>
             </Tooltip>
           )}
+          {displayBuildInfo && (
+            <Tooltip
+              title={`Build date: ${displayBuildInfo.date}, Commit hash: ${displayBuildInfo.commitHash}`}
+              enterDelay={300}
+              placement={'top-start'}
+            >
+              <div className={css.envMetadata}>
+                <span>Version: </span>
+                <a
+                  href={displayBuildInfo.commitUrl}
+                  className={classes(css.link, commonCss.unstyled)}
+                  rel='noopener'
+                  target='_blank'
+                >
+                  {displayBuildInfo.tagName}
+                </a>
+              </div>
+            </Tooltip>
+          )}
+          <Tooltip title='Report an Issue' enterDelay={300} placement={'top-start'}>
+            <div className={css.envMetadata}>
+              <a
+                href={ExternalLinks.GITHUB_ISSUE}
+                className={classes(css.link, commonCss.unstyled)}
+                rel='noopener'
+                target='_blank'
+              >
+                Report an Issue
+              </a>
+            </div>
+          </Tooltip>
         </div>
-      </div >
+      </div>
     );
   }
 
+  private _getBuildInfo(buildInfo = this.props.buildInfo): DisplayBuildInfo {
+    const commitHash = buildInfo?.apiServerCommitHash || buildInfo?.frontendCommitHash || '';
+    const tagName = buildInfo?.apiServerTagName || buildInfo?.frontendTagName || '';
+
+    return {
+      tagName: tagName || 'unknown',
+      commitHash: commitHash ? commitHash.substring(0, 7) : 'unknown',
+      commitUrl:
+        'https://www.github.com/kubeflow/pipelines' +
+        (commitHash && commitHash !== 'unknown' ? `/commit/${commitHash}` : ''),
+      date: buildInfo?.buildDate
+        ? new Date(buildInfo?.buildDate).toLocaleDateString('en-US')
+        : 'unknown',
+    };
+  }
+
+  private _highlightPipelinesButton(page: string): boolean {
+    return page.startsWith(RoutePage.PIPELINES) || page.startsWith(RoutePage.PIPELINES_SHARED);
+  }
+
   private _highlightExperimentsButton(page: string): boolean {
-    return page.startsWith(RoutePage.EXPERIMENTS)
-      || page.startsWith(RoutePage.RUNS)
-      // TODO: Router should have a constant for this, but it doesn't follow the naming convention
-      // of the other pages
-      || page.startsWith('/recurringrun')
-      || page.startsWith(RoutePage.COMPARE);
+    return page.startsWith(RoutePage.EXPERIMENTS) || page === RoutePage.ARCHIVED_EXPERIMENTS;
+  }
+
+  private _highlightRunsButton(page: string): boolean {
+    return (
+      page.startsWith(RoutePage.RUNS) ||
+      page.startsWith(RoutePage.COMPARE) ||
+      page === RoutePage.ARCHIVED_RUNS
+    );
+  }
+
+  private _highlightRecurringRunsButton(page: string): boolean {
+    return page.startsWith(RoutePage.RECURRING_RUNS) || page.startsWith(RoutePrefix.RECURRING_RUN);
+  }
+
+  private _highlightArtifactsButton(page: string): boolean {
+    return page.startsWith(RoutePrefix.ARTIFACT);
   }
 
   private _toggleNavClicked(): void {
-    this.setStateSafe({
-      collapsed: !this.state.collapsed,
-      manualCollapseState: true,
-    }, () => LocalStorage.saveNavbarCollapsed(this.state.collapsed));
+    this.setStateSafe(
+      {
+        collapsed: !this.state.collapsed,
+        manualCollapseState: true,
+      },
+      () => LocalStorage.saveNavbarCollapsed(this.state.collapsed),
+    );
     this._toggleNavCollapsed();
   }
 
@@ -357,3 +655,39 @@ export default class SideNav extends React.Component<SideNavProps, SideNavState>
     }
   }
 }
+
+interface ExternalUriProps {
+  title: string;
+  to: string;
+  collapsed: boolean;
+  icon: (className: string) => React.ReactNode;
+}
+
+// tslint:disable-next-line:variable-name
+const ExternalUri: React.FC<ExternalUriProps> = ({ title, to, collapsed, icon }) => (
+  <Tooltip
+    title={title}
+    enterDelay={300}
+    placement={'right-start'}
+    disableFocusListener={!collapsed}
+    disableHoverListener={!collapsed}
+    disableTouchListener={!collapsed}
+  >
+    <a href={to} className={commonCss.unstyled} target='_blank' rel='noopener noreferrer'>
+      <SideNavButton collapsed={collapsed}>
+        <div className={tailwindcss.sideNavItem}>
+          {icon(css.icon)}
+          <span className={classes(collapsed && css.collapsedLabel, css.label)}>{title}</span>
+          <OpenInNewIcon className={css.openInNewTabIcon} />
+        </div>
+      </SideNavButton>
+    </a>
+  </Tooltip>
+);
+
+const EnhancedSideNav: React.FC<SideNavProps> = (props) => {
+  const gkeMetadata = React.useContext(GkeMetadataContext);
+  const buildInfo = React.useContext(BuildInfoContext);
+  return <SideNav {...props} gkeMetadata={gkeMetadata} buildInfo={buildInfo} />;
+};
+export default EnhancedSideNav;

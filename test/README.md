@@ -1,78 +1,100 @@
-# ML pipeline test infrastructure
+# ML Pipeline Test Infrastructure
 
-This folder contains the integration/e2e tests for ML pipeline. We use Argo workflow to run the tests.
+This folder contains the integration and end-to-end (E2E) tests for the ML pipeline. Tests are executed using Kind (Kubernetes IN Docker) to simulate a Kubernetes cluster locally. GitHub Actions (GHAs) handle automated testing on pull requests.
 
-At a high level, a typical test workflow will
+At a high level, a typical test workflow will:
+- Build images for all components.
+- Create a dedicated test namespace in the cluster.
+- Deploy the ML pipeline using the newly built components.
+- Run the tests.
+- Clean up the namespace and temporary resources.
 
-- build docker images for all components
-- create a dedicate test namespace in the cluster 
-- deploy ml pipeline using the newly built components
-- run the test
-- delete the namespace
-- delete the images
+These steps are performed in the same Kubernetes cluster.
 
-All these steps will be taking place in the same Kubernetes cluster. 
-You can use GKE to test against the code in a Github Branch. The image will be temporarily stored in the GCR repository in the same project.
+---
 
-Tests are run automatically on each commit in a Kubernetes cluster using
-[Prow](https://github.com/kubernetes/test-infra/tree/master/prow).
-Tests can also be run manually, see the next section.
+## Running Tests Locally with Kind
 
-## Run tests using GKE
-
-You could run the tests against a specific commit.
+To run tests locally, set up a Kind cluster and follow the same steps as the GitHub Actions workflows. This section details the process.
 
 ### Setup
 
-Here are the one-time steps to prepare for your GKE testing cluster:
-- Follow the [main page](https://github.com/kubeflow/pipelines#setup-gke) to
-create a GKE cluster.
-- Install [Argo](https://github.com/argoproj/argo/blob/master/demo.md#argo-v20-getting-started)
-in the cluster. If you have Argo CLI installed locally, just run
-  ```
-  argo install
-  ```
-- Create cluster role binding.
-  ```
-  kubectl create clusterrolebinding default-as-admin
-  --clusterrole=cluster-admin --serviceaccount default:default
-  ```
-- Follow the
-[guideline](https://developer.github.com/v3/guides/managing-deploy-keys/) to
-create a
-[ssh](https://help.github.com/articles/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent/)
-deploy key, and store as Kubernetes secret in your cluster, so the job can
-later access the code. Note it requires admin permission to add a deploy key
-to github repo. This step is not needed when the project is public.
-  ```
-  kubectl create secret generic ssh-key-secret
-  --from-file=id_rsa=/path/to/your/id_rsa
-  --from-file=id_rsa.pub=/path/to/your/id_rsa.pub
-  ```
+1. **Install Prerequisites**:
+   - A container engine like [Podman](https://podman.io) or [Docker](https://docs.docker.com/get-docker/)
+   - [Kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation)
+   - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 
-### Run tests
-Simply submit the test workflow to the GKE cluster, with a parameter
-specifying the commit you want to test (master HEAD by default):
-```
-argo submit integration_test_gke.yaml -p commit-sha=<commit>
-```
-You can check the result by doing:
-```
-argo list
-```
-The workflow will create a temporary namespace with the same name as the Argo
-workflow. All the images will be stored in
-**gcr.io/project_id/workflow_name/branch_name/***. By default when the test is
-*finished, the namespace and images will be deleted.
-However you can keep them by providing additional parameter. 
-```
-argo submit integration_test_gke.yaml -p branch="my-branch" -p cleanup="false"
-```
+2. **Set Up a Kind Cluster**:
+   Create a configuration file for your Kind cluster (optional):
+   ```yaml
+   kind: Cluster
+   apiVersion: kind.x-k8s.io/v1alpha4
+   nodes:
+     - role: control-plane
+     - role: worker
+    ```
+   Create the cluster:
 
-## Troubleshooting
+    `kind create cluster --name kfp-test-cluster --config kind-config.yaml`
 
-**Q: Why is my test taking so long on GKE?**
+    Verify the cluster:
 
-The cluster downloads a bunch of images during the first time the test runs. It will be faster the second time since the images are cached.
-The image building steps are running in parallel and usually takes 2~3 minutes in total. If you are experiencing high latency, it might due to the resource constrains
-on your GKE cluster. In that case you need to deploy a larger cluster. 
+    `kubectl cluster-info --context kind-kfp-test-cluster`
+
+3.  **Prepare the Test Environment**:
+
+    -   Install Python test dependencies:
+
+        `uv sync --extra test`
+
+    -   Deploy Kubeflow Pipelines to the Kind cluster:
+
+        `kubectl apply -k manifests/`
+
+4.  **Run the Tests**:
+Execute the desired test suite:
+
+    `uv run pytest test/kfp-functional-test/`
+
+For additional guidance on deploying Kubeflow Pipelines in Kind, refer to:
+
+-   [Kind Local Cluster Deployment Guide](../docs/agents/development.md#local-clusters)
+-   [Operator Deployment Guide](https://www.kubeflow.org/docs/components/pipelines/operator-guides/installation/#deploying-kubeflow-pipelines)
+
+
+## Automated Testing with GitHub Actions
+
+
+Tests are automatically triggered on GitHub when:
+
+-   A pull request is opened or updated.
+
+GitHub Actions workflows are defined in the `.github/workflows/` directory.
+
+### Reproducing CI Steps Locally
+
+To replicate the steps locally:
+
+1.  Clone the Kubeflow Pipelines repository:
+
+    `git clone https://github.com/kubeflow/pipelines.git
+    cd pipelines`
+
+2.  Follow the steps outlined in the **Running Tests Locally with Kind** section.
+
+3.  To mimic the GitHub Actions environment, export any required environment variables found in the workflow files.
+
+* * * * *
+
+Troubleshooting
+---------------
+
+**Q: Why is my test taking so long?**
+
+-   The first run downloads many container images. Subsequent runs will be faster due to caching.
+-   If you experience high latency, ensure the local system running Kind has sufficient resources (CPU, memory).
+
+**Q: How do I clean up the Kind cluster?**
+
+-   Delete the Kind cluster:
+    `kind delete cluster --name kfp-test-cluster`

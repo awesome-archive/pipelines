@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,164 +14,168 @@
  * limitations under the License.
  */
 
+import { NavigationProps } from 'src/lib/Navigation';
 import * as React from 'react';
-import CustomTable, { Column, Row } from '../components/CustomTable';
-import RunUtils, { MetricMetadata } from '../../src/lib/RunUtils';
-import { ApiRunDetail, ApiRun, ApiResourceType, RunMetricFormat, ApiRunMetric } from '../../src/apis/run';
-import { Apis, RunSortKeys, ListRequest } from '../lib/Apis';
-import { Link, RouteComponentProps } from 'react-router-dom';
-import { NodePhase, statusToIcon } from './Status';
-import { RoutePage, RouteParams, QUERY_PARAMS } from '../components/Router';
-import { URLParser } from '../lib/URLParser';
-import { Workflow } from '../../../frontend/third_party/argo-ui/argo_template';
-import { commonCss, color } from '../Css';
-import { getRunTime, formatDateString, logger, errorToMessage } from '../lib/Utils';
-import { stylesheet } from 'typestyle';
+import CustomTable, { Column, Row, CustomRendererProps } from 'src/components/CustomTable';
+import { ExperimentInfo } from 'src/lib/ExperimentInfo';
+import { V2Run, V2RuntimeState, V2RunStorageState } from 'src/apisv2/run';
+import { V2ListExperimentsResponse } from 'src/apisv2/experiment';
+import { ResponseError, V2PipelineVersion } from 'src/apisv2/pipeline';
+import { Apis, RunSortKeys, ListRequest } from 'src/lib/Apis';
+import { Link } from 'react-router';
+import { V2Filter, V2PredicateOperation } from 'src/apisv2/filter';
+import { RoutePage, RouteParams, QUERY_PARAMS } from 'src/components/Router';
+import { URLParser } from 'src/lib/URLParser';
+import { commonCss } from 'src/Css';
+import { formatDateString, logger, errorToMessage, getRunDurationV2 } from 'src/lib/Utils';
+import { statusToIcon } from './StatusV2';
+import { Tooltip } from '@mui/material';
 
-const css = stylesheet({
-  metricContainer: {
-    background: '#f6f7f9',
-    marginLeft: 6,
-    marginRight: 10,
-  },
-  metricFill: {
-    background: '#cbf0f8',
-    boxSizing: 'border-box',
-    color: '#202124',
-    fontFamily: 'Roboto',
-    fontSize: 13,
-    textIndent: 6,
-  },
-});
-
-interface ExperimentInfo {
-  displayName: string;
-  id: string;
+interface PipelineVersionInfo {
+  displayName?: string;
+  versionId?: string;
+  runId?: string;
+  recurringRunId?: string;
+  pipelineId?: string;
+  usePlaceholder: boolean;
+  unavailable?: boolean;
 }
 
-interface PipelineInfo {
+interface RecurringRunInfo {
   displayName?: string;
   id?: string;
-  runId?: string;
-  showLink: boolean;
 }
 
 interface DisplayRun {
   experiment?: ExperimentInfo;
-  metadata: ApiRun;
-  pipeline?: PipelineInfo;
-  workflow?: Workflow;
+  recurringRun?: RecurringRunInfo;
+  run: V2Run;
+  pipelineVersion?: PipelineVersionInfo;
   error?: string;
 }
 
-interface DisplayMetric {
-  metadata: MetricMetadata;
-  metric?: ApiRunMetric;
-}
+// Both masks cannot be provided together.
+type MaskProps = Exclude<
+  { experimentIdMask?: string; namespaceMask?: string },
+  { experimentIdMask: string; namespaceMask: string }
+>;
 
-export interface RunListProps extends RouteComponentProps {
-  disablePaging?: boolean;
-  disableSelection?: boolean;
-  disableSorting?: boolean;
-  experimentIdMask?: string;
-  noFilterBox?: boolean;
-  onError: (message: string, error: Error) => void;
-  onSelectionChange?: (selectedRunIds: string[]) => void;
-  runIdListMask?: string[];
-  selectedIds?: string[];
-}
+export type RunListProps = MaskProps &
+  NavigationProps & {
+    disablePaging?: boolean;
+    disableSelection?: boolean;
+    disableSorting?: boolean;
+    hideExperimentColumn?: boolean;
+    noFilterBox?: boolean;
+    onError: (message: string, error: Error) => void;
+    onSelectionChange?: (selectedRunIds: string[]) => void;
+    runIdListMask?: string[];
+    selectedIds?: string[];
+    storageState?: V2RunStorageState;
+  };
 
 interface RunListState {
-  metrics: MetricMetadata[];
   runs: DisplayRun[];
 }
 
+function _pipelineVersionKey(pipelineId: string, pipelineVersionId: string): string {
+  return `${pipelineId}/${pipelineVersionId}`;
+}
+
 class RunList extends React.PureComponent<RunListProps, RunListState> {
+  private _isMounted = true;
   private _tableRef = React.createRef<CustomTable>();
 
   constructor(props: any) {
     super(props);
 
     this.state = {
-      metrics: [],
       runs: [],
     };
   }
 
-  public render(): JSX.Element {
-    // Only show the two most prevalent metrics
-    const metricMetadata: MetricMetadata[] = this.state.metrics.slice(0, 2);
+  public render(): React.JSX.Element {
     const columns: Column[] = [
       {
-        customRenderer: this._nameCustomRenderer.bind(this),
-        flex: 2,
+        customRenderer: this._nameCustomRenderer,
+        flex: 1.5,
         label: 'Run name',
         sortKey: RunSortKeys.NAME,
       },
-      { customRenderer: this._statusCustomRenderer.bind(this), flex: 0.5, label: 'Status' },
+      { customRenderer: this._statusCustomRenderer, flex: 0.5, label: 'Status' },
       { label: 'Duration', flex: 0.5 },
-      { customRenderer: this._experimentCustomRenderer.bind(this), label: 'Experiment', flex: 1 },
-      { customRenderer: this._pipelineCustomRenderer.bind(this), label: 'Pipeline', flex: 1 },
+      { customRenderer: this._pipelineVersionCustomRenderer, label: 'Pipeline Version', flex: 1 },
+      { customRenderer: this._recurringRunCustomRenderer, label: 'Recurring Run', flex: 0.5 },
       { label: 'Start time', flex: 1, sortKey: RunSortKeys.CREATED_AT },
     ];
 
-    if (metricMetadata.length) {
-      // This is a column of empty cells with a left border to separate the metrics from the other
-      // columns.
-      columns.push({
-        customRenderer: this._metricBufferCustomRenderer.bind(this),
-        flex: 0.1,
-        label: '',
+    if (!this.props.hideExperimentColumn) {
+      columns.splice(3, 0, {
+        customRenderer: this._experimentCustomRenderer,
+        flex: 1,
+        label: 'Experiment',
       });
-
-      columns.push(...metricMetadata.map((metadata) => {
-        return {
-          customRenderer: this._metricCustomRenderer.bind(this),
-          flex: 1,
-          label: metadata.name!
-        };
-      }));
     }
 
-    const rows: Row[] = this.state.runs.map(r => {
-      const displayMetrics = metricMetadata.map(metadata => {
-        const displayMetric: DisplayMetric = { metadata };
-        if (r.metadata.metrics) {
-          const foundMetric = r.metadata.metrics.find(m => m.name === metadata.name);
-          if (foundMetric && foundMetric.number_value !== undefined) {
-            displayMetric.metric = foundMetric;
-          }
-        }
-        return displayMetric;
-      });
+    const rows: Row[] = this.state.runs.map((r) => {
       const row = {
         error: r.error,
-        id: r.metadata.id!,
+        id: r.run.run_id!,
         otherFields: [
-          r.metadata!.name,
-          r.metadata.status || '-',
-          getRunTime(r.workflow),
-          r.experiment,
-          r.pipeline,
-          formatDateString(r.metadata.created_at),
-        ]
+          r.run!.display_name,
+          r.run.state,
+          getRunDurationV2(r.run),
+          r.pipelineVersion,
+          r.recurringRun,
+          formatDateString(r.run.created_at),
+        ] as any,
       };
-      if (displayMetrics.length) {
-        row.otherFields.push(''); // Metric buffer column
-        row.otherFields.push(...displayMetrics as any);
+      if (!this.props.hideExperimentColumn) {
+        row.otherFields.splice(3, 0, r.experiment);
       }
       return row;
     });
 
-    return (<div>
-      <CustomTable columns={columns} rows={rows} selectedIds={this.props.selectedIds}
-        initialSortColumn={RunSortKeys.CREATED_AT} ref={this._tableRef} filterLabel='Filter runs'
-        updateSelection={this.props.onSelectionChange} reload={this._loadRuns.bind(this)}
-        disablePaging={this.props.disablePaging} disableSorting={this.props.disableSorting}
-        disableSelection={this.props.disableSelection} noFilterBox={this.props.noFilterBox}
-        emptyMessage={`No runs found${this.props.experimentIdMask ? ' for this experiment' : ''}.`}
-      />
-    </div>);
+    return (
+      <div>
+        <CustomTable
+          columns={columns}
+          rows={rows}
+          selectedIds={this.props.selectedIds}
+          initialSortColumn={RunSortKeys.CREATED_AT}
+          ref={this._tableRef}
+          filterLabel='Filter runs'
+          updateSelection={this.props.onSelectionChange}
+          reload={this._loadRuns.bind(this)}
+          disablePaging={this.props.disablePaging}
+          disableSorting={this.props.disableSorting}
+          disableSelection={this.props.disableSelection}
+          noFilterBox={this.props.noFilterBox}
+          emptyMessage={
+            `No` +
+            `${
+              this.props.storageState === V2RunStorageState.ARCHIVED ? ' archived' : ' available'
+            }` +
+            ` runs found` +
+            `${
+              this.props.experimentIdMask
+                ? ' for this experiment'
+                : this.props.namespaceMask
+                  ? ' for this namespace'
+                  : ''
+            }.`
+          }
+        />
+      </div>
+    );
+  }
+
+  public componentDidMount(): void {
+    this._isMounted = true;
+  }
+
+  public componentWillUnmount(): void {
+    this._isMounted = false;
   }
 
   public async refresh(): Promise<void> {
@@ -180,119 +184,173 @@ class RunList extends React.PureComponent<RunListProps, RunListState> {
     }
   }
 
-  public _nameCustomRenderer(value: string, id: string): JSX.Element {
-    return <Link className={commonCss.link} onClick={(e) => e.stopPropagation()}
-      to={RoutePage.RUN_DETAILS.replace(':' + RouteParams.runId, id)}>{value}</Link>;
-  }
+  public _nameCustomRenderer: React.FC<CustomRendererProps<string>> = (
+    props: CustomRendererProps<string>,
+  ) => {
+    return (
+      <Tooltip title={props.value || ''} enterDelay={300} placement='top-start'>
+        <Link
+          className={commonCss.link}
+          data-testid='run-name-link'
+          data-run-id={props.id}
+          data-run-name={props.value || ''}
+          onClick={(e) => e.stopPropagation()}
+          to={RoutePage.RUN_DETAILS.replace(':' + RouteParams.runId, props.id)}
+        >
+          {props.value}
+        </Link>
+      </Tooltip>
+    );
+  };
 
-  public _pipelineCustomRenderer(pipelineInfo: PipelineInfo, id: string): JSX.Element {
+  public _pipelineVersionCustomRenderer: React.FC<CustomRendererProps<PipelineVersionInfo>> = (
+    props: CustomRendererProps<PipelineVersionInfo>,
+  ) => {
+    if (props.value?.unavailable) {
+      return <span title='The pipeline version is no longer available.'>Unavailable</span>;
+    }
     // If the getPipeline call failed or a run has no pipeline, we display a placeholder.
-    if (!pipelineInfo || (!pipelineInfo.showLink && !pipelineInfo.id)) {
+    if (!props.value || (!props.value.usePlaceholder && !props.value.pipelineId)) {
       return <div>-</div>;
     }
-    const search = new URLParser(this.props).build({ [QUERY_PARAMS.fromRunId]: id });
-    const url = pipelineInfo.showLink ?
-      RoutePage.PIPELINE_DETAILS.replace(':' + RouteParams.pipelineId + '?', '') + search :
-      RoutePage.PIPELINE_DETAILS.replace(':' + RouteParams.pipelineId, pipelineInfo.id || '');
-    return (
-      <Link className={commonCss.link} onClick={(e) => e.stopPropagation()}
-        to={url}>
-        {pipelineInfo.showLink ? '[View pipeline]' : pipelineInfo.displayName}
-      </Link>
-    );
-  }
-
-  public _experimentCustomRenderer(experimentInfo?: ExperimentInfo): JSX.Element {
-    // If the getExperiment call failed or a run has no experiment, we display a placeholder.
-    if (!experimentInfo || !experimentInfo.id) {
-      return <div>-</div>;
-    }
-    return (
-      <Link className={commonCss.link} onClick={(e) => e.stopPropagation()}
-        to={RoutePage.EXPERIMENT_DETAILS.replace(':' + RouteParams.experimentId, experimentInfo.id)}>
-        {experimentInfo.displayName}
-      </Link>
-    );
-  }
-
-  public _statusCustomRenderer(status: NodePhase): JSX.Element {
-    return statusToIcon(status);
-  }
-
-  public _metricBufferCustomRenderer(): JSX.Element {
-    return <div style={{ borderLeft: `1px solid ${color.divider}`, padding: '20px 0' }} />;
-  }
-
-  public _metricCustomRenderer(displayMetric: DisplayMetric): JSX.Element {
-    if (!displayMetric || !displayMetric.metric ||
-      displayMetric.metric.number_value === undefined ||
-      (displayMetric.metric.format !== RunMetricFormat.PERCENTAGE && !displayMetric.metadata)) {
-      return <div />;
-    }
-
-    const leftSpace = 6;
-    let displayString = '';
-    let width = '';
-
-    if (displayMetric.metric.format === RunMetricFormat.PERCENTAGE) {
-      displayString = (displayMetric.metric.number_value * 100).toFixed(3) + '%';
-      width = `calc(${displayString})`;
+    const urlParser = new URLParser(this.props);
+    const search = props.value.recurringRunId
+      ? urlParser.build({ [QUERY_PARAMS.fromRecurringRunId]: props.value.recurringRunId })
+      : urlParser.build({ [QUERY_PARAMS.fromRunId]: props.id });
+    const url = props.value.usePlaceholder
+      ? RoutePage.PIPELINE_DETAILS_NO_VERSION.replace(':' + RouteParams.pipelineId + '?', '') +
+        search
+      : props.value.versionId
+        ? RoutePage.PIPELINE_DETAILS.replace(
+            ':' + RouteParams.pipelineId,
+            props.value.pipelineId || '',
+          ).replace(':' + RouteParams.pipelineVersionId, props.value.versionId || '')
+        : RoutePage.PIPELINE_DETAILS_NO_VERSION.replace(
+            ':' + RouteParams.pipelineId,
+            props.value.pipelineId || '',
+          );
+    if (props.value.usePlaceholder) {
+      return (
+        <Link className={commonCss.link} onClick={(e) => e.stopPropagation()} to={url}>
+          [View pipeline]
+        </Link>
+      );
     } else {
-      displayString = displayMetric.metric.number_value.toFixed(3);
+      // Display name could be too long, so we show the full content in tooltip on hover.
+      return (
+        <Tooltip title={props.value.displayName || ''} enterDelay={300} placement='top-start'>
+          <Link className={commonCss.link} onClick={(e) => e.stopPropagation()} to={url}>
+            {props.value.displayName}
+          </Link>
+        </Tooltip>
+      );
+    }
+  };
 
-      if (displayMetric.metadata.maxValue === 0 && displayMetric.metadata.minValue === 0) {
-        return <div style={{ paddingLeft: leftSpace }}>{displayString}</div>;
-      }
+  public _recurringRunCustomRenderer: React.FC<CustomRendererProps<RecurringRunInfo>> = (
+    props: CustomRendererProps<RecurringRunInfo>,
+  ) => {
+    // If the response of listRuns doesn't contain job details, we display a placeholder.
+    if (!props.value || !props.value.id) {
+      return <div>-</div>;
+    }
+    const url = RoutePage.RECURRING_RUN_DETAILS.replace(
+      ':' + RouteParams.recurringRunId,
+      props.value.id || '',
+    );
+    return (
+      <Link className={commonCss.link} onClick={(e) => e.stopPropagation()} to={url}>
+        {props.value.displayName || '[View config]'}
+      </Link>
+    );
+  };
 
-      if (displayMetric.metric.number_value - displayMetric.metadata.minValue < 0) {
-        logger.error(`Run ${arguments[1]}'s metric ${displayMetric.metadata.name}'s value:`
-          + ` (${displayMetric.metric.number_value}) was lower than the supposed minimum of`
-          + ` (${displayMetric.metadata.minValue})`);
-        return <div style={{ paddingLeft: leftSpace }}>{displayString}</div>;
-      }
-
-      if (displayMetric.metadata.maxValue - displayMetric.metric.number_value < 0) {
-        logger.error(`Run ${arguments[1]}'s metric ${displayMetric.metadata.name}'s value:`
-          + ` (${displayMetric.metric.number_value}) was greater than the supposed maximum of`
-          + ` (${displayMetric.metadata.maxValue})`);
-        return <div style={{ paddingLeft: leftSpace }}>{displayString}</div>;
-      }
-
-      const barWidth =
-        (displayMetric.metric.number_value - displayMetric.metadata.minValue)
-        / (displayMetric.metadata.maxValue - displayMetric.metadata.minValue)
-        * 100;
-
-      width = `calc(${barWidth}%)`;
+  public _experimentCustomRenderer: React.FC<CustomRendererProps<ExperimentInfo>> = (
+    props: CustomRendererProps<ExperimentInfo>,
+  ) => {
+    // If the getExperiment call failed or a run has no experiment, we display a placeholder.
+    if (!props.value || !props.value.id) {
+      return <div>-</div>;
     }
     return (
-      <div className={css.metricContainer}>
-        <div className={css.metricFill} style={{ width }}>
-          {displayString}
-        </div>
-      </div>
+      <Link
+        className={commonCss.link}
+        onClick={(e) => e.stopPropagation()}
+        to={RoutePage.EXPERIMENT_DETAILS.replace(':' + RouteParams.experimentId, props.value.id)}
+      >
+        {props.value.displayName}
+      </Link>
     );
-  }
+  };
+
+  public _statusCustomRenderer: React.FC<CustomRendererProps<V2RuntimeState>> = (
+    props: CustomRendererProps<V2RuntimeState>,
+  ) => {
+    return statusToIcon(props.value);
+  };
 
   protected async _loadRuns(request: ListRequest): Promise<string> {
-    let displayRuns: DisplayRun[] = [];
+    let displayRuns: DisplayRun[];
     let nextPageToken = '';
 
     if (Array.isArray(this.props.runIdListMask)) {
-      displayRuns = this.props.runIdListMask.map(id => ({ metadata: { id } }));
+      displayRuns = this.props.runIdListMask.map((id) => ({ run: { run_id: id } }));
+      const filter = JSON.parse(
+        decodeURIComponent(request.filter || '{"predicates": []}'),
+      ) as V2Filter;
+      // listRuns doesn't currently support batching by IDs, so in this case we retrieve and filter
+      // each run individually.
+      await this._getAndSetRuns(displayRuns);
+      const predicates = filter.predicates?.filter(
+        (p) => p.key === 'name' && p.operation === V2PredicateOperation.IS_SUBSTRING,
+      );
+      const substrings = predicates?.map((p) => p.string_value?.toLowerCase() || '') || [];
+      displayRuns = displayRuns.filter((runDetail) => {
+        for (const sub of substrings) {
+          if (!runDetail?.run?.display_name?.toLowerCase().includes(sub)) {
+            return false;
+          }
+        }
+        return true;
+      });
     } else {
       // Load all runs
+      if (this.props.storageState) {
+        try {
+          // Augment the request filter with the storage state predicate
+          const filter = JSON.parse(
+            decodeURIComponent(request.filter || '{"predicates": []}'),
+          ) as V2Filter;
+          filter.predicates = (filter.predicates || []).concat([
+            {
+              key: 'storage_state',
+              // Use EQUALS ARCHIVED or NOT EQUALS ARCHIVED to account for cases where the field
+              // is missing, in which case it should be counted as available.
+              operation:
+                this.props.storageState === V2RunStorageState.ARCHIVED
+                  ? V2PredicateOperation.EQUALS
+                  : V2PredicateOperation.NOT_EQUALS,
+              string_value: V2RunStorageState.ARCHIVED.toString(),
+            },
+          ]);
+          request.filter = encodeURIComponent(JSON.stringify(filter));
+        } catch (err) {
+          logger.error('Could not parse request filter: ', request.filter);
+        }
+      }
+
       try {
-        const response = await Apis.runServiceApi.listRuns(
+        const response = await Apis.runServiceApiV2.listRuns(
+          this.props.namespaceMask,
+          this.props.experimentIdMask,
           request.pageToken,
           request.pageSize,
           request.sortBy,
-          this.props.experimentIdMask ? ApiResourceType.EXPERIMENT.toString() : undefined,
-          this.props.experimentIdMask,
           request.filter,
+          /* skip_count */ true, // this page never displays the total run count
         );
 
-        displayRuns = (response.runs || []).map(r => ({ metadata: r }));
+        displayRuns = (response.runs || []).map((r) => ({ run: r }));
         nextPageToken = response.next_page_token || '';
       } catch (err) {
         const error = new Error(await errorToMessage(err));
@@ -302,87 +360,184 @@ class RunList extends React.PureComponent<RunListProps, RunListState> {
       }
     }
 
-    await this._getAndSetMetadataAndWorkflows(displayRuns);
-    await this._getAndSetPipelineNames(displayRuns);
-    await this._getAndSetExperimentNames(displayRuns);
+    await this._setColumns(displayRuns);
 
-    this.setState({
-      metrics: RunUtils.extractMetricMetadata(displayRuns.map(r => r.metadata)),
+    this.setStateSafe({
       runs: displayRuns,
     });
     return nextPageToken;
   }
 
-  /**
-   * For each DisplayRun, get its workflow spec and parse it into an object
-   */
-  private _getAndSetMetadataAndWorkflows(displayRuns: DisplayRun[]): Promise<DisplayRun[]> {
-    // Fetch and set the workflow details
-    return Promise.all(displayRuns.map(async displayRun => {
-      let getRunResponse: ApiRunDetail;
-      try {
-        getRunResponse = await Apis.runServiceApi.getRun(displayRun.metadata!.id!);
-        displayRun.metadata = getRunResponse.run!;
-        displayRun.workflow =
-          JSON.parse(getRunResponse.pipeline_runtime!.workflow_manifest || '{}');
-      } catch (err) {
-        // This could be an API exception, or a JSON parse exception.
-        displayRun.error = await errorToMessage(err);
+  private setStateSafe(newState: Partial<RunListState>, cb?: () => void): void {
+    if (this._isMounted) {
+      this.setState(newState as any, cb);
+    }
+  }
+
+  private async _setColumns(displayRuns: DisplayRun[]): Promise<DisplayRun[]> {
+    let experimentsResponse: V2ListExperimentsResponse;
+    let experimentsGetError: string;
+    try {
+      if (!this.props.namespaceMask) {
+        // Single-user mode.
+        experimentsResponse = await Apis.experimentServiceApiV2.listExperiments();
+      } else {
+        // Multi-user mode.
+        experimentsResponse = await Apis.experimentServiceApiV2.listExperiments(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          this.props.namespaceMask,
+        );
       }
-      return displayRun;
-    }));
+    } catch (error) {
+      experimentsGetError = 'Failed to get associated experiment: ' + (await errorToMessage(error));
+    }
+
+    const { pipelineVersionsByKey, errorsByKey } =
+      await this._getReferencedPipelineVersions(displayRuns);
+
+    return Promise.all(
+      displayRuns.map(async (displayRun) => {
+        this._setRecurringRun(displayRun);
+
+        this._setPipelineVersionName(displayRun, pipelineVersionsByKey, errorsByKey);
+
+        if (!this.props.hideExperimentColumn) {
+          const experimentId = displayRun.run.experiment_id;
+
+          if (experimentId) {
+            const experiment = experimentsResponse?.experiments?.find(
+              (e) => e.experiment_id === displayRun.run.experiment_id,
+            );
+            // If matching experiment id not found (typically because it has been deleted), set display name to "-".
+            const displayName = experiment?.display_name || '-';
+            if (experimentsGetError) {
+              displayRun.error = experimentsGetError;
+            } else {
+              displayRun.experiment = {
+                displayName: displayName,
+                id: experimentId,
+              };
+            }
+          }
+        }
+        return displayRun;
+      }),
+    );
+  }
+
+  private _setRecurringRun(displayRun: DisplayRun): void {
+    const recurringRunId = displayRun.run.recurring_run_id;
+    // TBD(jlyaoyuli): how to get recurringRun name
+    if (recurringRunId) {
+      displayRun.recurringRun = { id: recurringRunId };
+    }
   }
 
   /**
-   * For each DisplayRun, get its ApiRun and retrieve that ApiRun's Pipeline ID if it has one, then
-   * use that Pipeline ID to fetch its associated Pipeline and attach that Pipeline's name to the
-   * DisplayRun. If the ApiRun has no Pipeline ID, then the corresponding DisplayRun will show '-'.
+   * For each run ID, fetch its corresponding run, and set it in DisplayRuns
    */
-  private _getAndSetPipelineNames(displayRuns: DisplayRun[]): Promise<DisplayRun[]> {
+  private _getAndSetRuns(displayRuns: DisplayRun[]): Promise<DisplayRun[]> {
     return Promise.all(
       displayRuns.map(async (displayRun) => {
-        const pipelineId = RunUtils.getPipelineId(displayRun.metadata);
-        if (pipelineId) {
-          try {
-            const pipeline = await Apis.pipelineServiceApi.getPipeline(pipelineId);
-            displayRun.pipeline = { displayName: pipeline.name || '', id: pipelineId, showLink: false };
-          } catch (err) {
-            // This could be an API exception, or a JSON parse exception.
-            displayRun.error = 'Failed to get associated pipeline: ' + await errorToMessage(err);
-          }
-        } else if (!!RunUtils.getPipelineSpec(displayRun.metadata)) {
-          displayRun.pipeline = { showLink: true };
+        let getRunResponse: V2Run;
+        try {
+          getRunResponse = await Apis.runServiceApiV2.getRun(displayRun.run!.run_id!);
+          displayRun.run = getRunResponse;
+        } catch (err) {
+          displayRun.error = await errorToMessage(err);
         }
         return displayRun;
-      })
+      }),
     );
   }
 
   /**
-   * For each DisplayRun, get its ApiRun and retrieve that ApiRun's Experiment ID if it has one,
-   * then use that Experiment ID to fetch its associated Experiment and attach that Experiment's
-   * name to the DisplayRun. If the ApiRun has no Experiment ID, then the corresponding DisplayRun
-   * will show '-'.
+   * Fetches each unique (pipeline_id, pipeline_version_id) pair referenced by the given runs
+   * exactly once, instead of fetching a pipeline version per run. Most runs on a page share
+   * only a handful of distinct pipeline versions, so this turns what used to be one API call
+   * per run into one call per unique version.
    */
-  private _getAndSetExperimentNames(displayRuns: DisplayRun[]): Promise<DisplayRun[]> {
-    return Promise.all(
-      displayRuns.map(async (displayRun) => {
-        const experimentId = RunUtils.getFirstExperimentReferenceId(displayRun.metadata);
-        if (experimentId) {
+  private async _getReferencedPipelineVersions(displayRuns: DisplayRun[]): Promise<{
+    pipelineVersionsByKey: Map<string, V2PipelineVersion>;
+    errorsByKey: Map<string, string>;
+  }> {
+    const uniqueVersionRefs = new Map<string, { pipelineId: string; pipelineVersionId: string }>();
+    displayRuns.forEach((displayRun) => {
+      const pipelineId = displayRun.run.pipeline_version_reference?.pipeline_id;
+      const pipelineVersionId = displayRun.run.pipeline_version_reference?.pipeline_version_id;
+      if (pipelineId && pipelineVersionId) {
+        uniqueVersionRefs.set(_pipelineVersionKey(pipelineId, pipelineVersionId), {
+          pipelineId,
+          pipelineVersionId,
+        });
+      }
+    });
+
+    const pipelineVersionsByKey = new Map<string, V2PipelineVersion>();
+    const errorsByKey = new Map<string, string>();
+    await Promise.all(
+      Array.from(uniqueVersionRefs.entries()).map(
+        async ([key, { pipelineId, pipelineVersionId }]) => {
           try {
-            // TODO: Experiment could be an optional field in state since whenever the RunList is
-            // created from the ExperimentDetails page, we already have the experiment (and will)
-            // be fetching the same one over and over here.
-            const experiment = await Apis.experimentServiceApi.getExperiment(experimentId);
-            displayRun.experiment = { displayName: experiment.name || '', id: experimentId };
+            const pipelineVersion = await Apis.pipelineServiceApiV2.getPipelineVersion(
+              pipelineId,
+              pipelineVersionId,
+            );
+            pipelineVersionsByKey.set(key, pipelineVersion);
           } catch (err) {
-            // This could be an API exception, or a JSON parse exception.
-            displayRun.error = 'Failed to get associated experiment: ' + await errorToMessage(err);
+            // Deleting a version does not delete the runs that reference it.
+            if (err instanceof ResponseError && err.response.status === 404) {
+              return;
+            }
+            errorsByKey.set(key, await errorToMessage(err));
+            logger.error(
+              `Failed to get pipeline version ${pipelineVersionId} for pipeline ${pipelineId}`,
+              err,
+            );
           }
-        }
-        return displayRun;
-      })
+        },
+      ),
     );
+    return { pipelineVersionsByKey, errorsByKey };
+  }
+
+  /**
+   * For the given DisplayRun, look up its associated pipeline version from the already-fetched
+   * pipelineVersionsByKey batch and attach its name to the DisplayRun. If the ApiRun has no
+   * Pipeline ID, then the corresponding DisplayRun will show '-'.
+   */
+  private _setPipelineVersionName(
+    displayRun: DisplayRun,
+    pipelineVersionsByKey: Map<string, V2PipelineVersion>,
+    errorsByKey: Map<string, string>,
+  ): void {
+    const pipelineId = displayRun.run.pipeline_version_reference?.pipeline_id;
+    const pipelineVersionId = displayRun.run.pipeline_version_reference?.pipeline_version_id;
+    if (pipelineId && pipelineVersionId) {
+      const key = _pipelineVersionKey(pipelineId, pipelineVersionId);
+      const pipelineVersion = pipelineVersionsByKey.get(key);
+      if (pipelineVersion) {
+        displayRun.pipelineVersion = {
+          displayName: pipelineVersion.display_name,
+          pipelineId: pipelineVersion.pipeline_id,
+          usePlaceholder: false,
+          versionId: pipelineVersion.pipeline_version_id,
+        };
+      } else if (errorsByKey.has(key)) {
+        const errorMessage = errorsByKey.get(key);
+        displayRun.error =
+          'Failed to get associated pipeline version' + (errorMessage ? ': ' + errorMessage : '');
+      } else {
+        displayRun.pipelineVersion = { usePlaceholder: false, unavailable: true };
+      }
+    } else if (displayRun.run.pipeline_spec) {
+      displayRun.pipelineVersion = displayRun.recurringRun?.id
+        ? { usePlaceholder: true, recurringRunId: displayRun.recurringRun.id }
+        : { usePlaceholder: true };
+    }
   }
 }
 

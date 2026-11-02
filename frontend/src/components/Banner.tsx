@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,18 +15,16 @@
  */
 
 import * as React from 'react';
-import Button from '@material-ui/core/Button';
-import Dialog from '@material-ui/core/Dialog';
-import DialogActions from '@material-ui/core/DialogActions';
-import DialogContent from '@material-ui/core/DialogContent';
-import DialogTitle from '@material-ui/core/DialogTitle';
-import ErrorIcon from '@material-ui/icons/Error';
-import WarningIcon from '@material-ui/icons/Warning';
+import ErrorIcon from '@mui/icons-material/Error';
+import WarningIcon from '@mui/icons-material/Warning';
+import InfoIcon from '@mui/icons-material/Info';
 import { classes, stylesheet } from 'typestyle';
 
 import { color, commonCss, spacing } from '../Css';
 
-export type Mode = 'error' | 'warning';
+import { Button, Dialog, DialogActions, DialogContent, DialogTitle } from '@mui/material';
+
+export type Mode = 'error' | 'warning' | 'info';
 
 export const css = stylesheet({
   banner: {
@@ -37,10 +35,16 @@ export const css = stylesheet({
     minHeight: '50px',
     padding: spacing.units(-4),
   },
+  bannerLeftAlign: {
+    marginLeft: 0,
+  },
   button: {
     color: color.secondaryText,
     maxHeight: '32px',
     minWidth: '75px',
+  },
+  detailsButton: {
+    backgroundColor: color.background,
   },
   icon: {
     height: '18px',
@@ -54,13 +58,21 @@ export const css = stylesheet({
   refreshButton: {
     backgroundColor: color.background,
   },
+  troubleShootingLink: {
+    alignItems: 'center',
+    color: color.theme,
+    fontWeight: 'bold',
+    padding: spacing.units(-4),
+  },
 });
 
 export interface BannerProps {
   additionalInfo?: string;
   message?: string;
   mode?: Mode;
+  showTroubleshootingGuideLink?: boolean;
   refresh?: () => void;
+  isLeftAlign?: boolean;
 }
 
 interface BannerState {
@@ -68,7 +80,6 @@ interface BannerState {
 }
 
 class Banner extends React.Component<BannerProps, BannerState> {
-
   constructor(props: any) {
     super(props);
 
@@ -77,23 +88,40 @@ class Banner extends React.Component<BannerProps, BannerState> {
     };
   }
 
-  public render(): JSX.Element {
-
+  public render(): React.JSX.Element {
     // Default to error styles.
-    let bannerModeCss = stylesheet({ mode: { backgroundColor: color.errorBg, color: color.errorText, } });
+    let bannerModeCss = stylesheet({
+      mode: { backgroundColor: color.errorBg, color: color.errorText },
+    });
     let bannerIcon = <ErrorIcon className={css.icon} />;
     let dialogTitle = 'An error occurred';
+    let showTroubleshootingGuideLink = false;
+    let showRefreshButton = true;
+    let isLeftAlign = this.props.isLeftAlign || false;
 
     switch (this.props.mode) {
       case 'error':
-        bannerModeCss = stylesheet({ mode: { backgroundColor: color.errorBg, color: color.errorText, } });
+        bannerModeCss = stylesheet({
+          mode: { backgroundColor: color.errorBg, color: color.errorText },
+        });
         bannerIcon = <ErrorIcon className={css.icon} />;
         dialogTitle = 'An error occurred';
+        showTroubleshootingGuideLink = this.props.showTroubleshootingGuideLink || false;
         break;
       case 'warning':
-        bannerModeCss = stylesheet({ mode: { backgroundColor: color.warningBg, color: color.errorText, } });
+        bannerModeCss = stylesheet({
+          mode: { backgroundColor: color.warningBg, color: color.warningText },
+        });
         bannerIcon = <WarningIcon className={css.icon} />;
         dialogTitle = 'Warning';
+        break;
+      case 'info':
+        bannerModeCss = stylesheet({
+          mode: { backgroundColor: color.infoBg, color: color.infoText },
+        });
+        bannerIcon = <InfoIcon className={css.icon} />;
+        dialogTitle = 'Info';
+        showRefreshButton = false;
         break;
       default:
         // Already set defaults above.
@@ -101,32 +129,56 @@ class Banner extends React.Component<BannerProps, BannerState> {
     }
 
     return (
-      <div className={classes(commonCss.flex, css.banner, bannerModeCss.mode)}>
+      <div
+        className={classes(
+          commonCss.flex,
+          css.banner,
+          isLeftAlign && css.bannerLeftAlign,
+          bannerModeCss.mode,
+        )}
+      >
         <div className={css.message}>
           {bannerIcon}
           {this.props.message}
         </div>
         <div className={commonCss.flex}>
-          {this.props.additionalInfo &&
-            <Button className={css.button} onClick={this._showAdditionalInfo.bind(this)}>
+          {showTroubleshootingGuideLink && (
+            <a
+              className={css.troubleShootingLink}
+              href='https://www.kubeflow.org/docs/pipelines/troubleshooting'
+            >
+              Troubleshooting guide
+            </a>
+          )}
+          {this.props.additionalInfo && (
+            <Button
+              className={classes(css.button, css.detailsButton)}
+              onClick={this._showAdditionalInfo.bind(this)}
+            >
               Details
             </Button>
-          }
-          {this.props.refresh &&
-            <Button className={classes(css.button, css.refreshButton)} onClick={this._refresh.bind(this)}>
+          )}
+          {showRefreshButton && this.props.refresh && (
+            <Button
+              className={classes(css.button, css.refreshButton)}
+              onClick={this._refresh.bind(this)}
+            >
               Refresh
             </Button>
-          }
+          )}
         </div>
 
-        {this.props.additionalInfo
-          && <Dialog open={this.state.dialogOpen} onClose={this._dialogClosed.bind(this)}>
+        {this.props.additionalInfo && (
+          <Dialog open={this.state.dialogOpen} onClose={this._dialogClosed.bind(this)}>
             <DialogTitle>{dialogTitle}</DialogTitle>
             <DialogContent className={commonCss.prewrap}>{this.props.additionalInfo}</DialogContent>
             <DialogActions>
-              <Button id='dismissDialogBtn' onClick={this._dialogClosed.bind(this)}>Dismiss</Button>
+              <Button id='dismissDialogBtn' onClick={this._dialogClosed.bind(this)}>
+                Dismiss
+              </Button>
             </DialogActions>
-          </Dialog>}
+          </Dialog>
+        )}
       </div>
     );
   }

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,11 +15,11 @@
 package util
 
 import (
+	"errors"
 	"testing"
 	"time"
 
-	"github.com/argoproj/argo/pkg/apis/workflow/v1alpha1"
-	"github.com/kataras/iris/core/errors"
+	"github.com/argoproj/argo-workflows/v4/pkg/apis/workflow/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -68,7 +68,6 @@ func TestCreateSubstitute(t *testing.T) {
 	result, err = formatter.createSubtitute("[[something]]")
 	assert.Nil(t, err)
 	assert.Equal(t, "[[something]]", result)
-
 }
 
 func TestCreateSubstituteError(t *testing.T) {
@@ -120,12 +119,12 @@ func TestFormatParameter(t *testing.T) {
 
 	param := v1alpha1.Parameter{
 		Name:  "PARAM_NAME",
-		Value: StringPointer("PARAM_PREFIX_[[uuid]]_SUFFIX"),
+		Value: v1alpha1.AnyStringPtr("PARAM_PREFIX_[[uuid]]_SUFFIX"),
 	}
 
 	expected := v1alpha1.Parameter{
 		Name:  "PARAM_NAME",
-		Value: StringPointer("PARAM_PREFIX_" + defaultUUID + "_SUFFIX"),
+		Value: v1alpha1.AnyStringPtr("PARAM_PREFIX_" + defaultUUID + "_SUFFIX"),
 	}
 
 	result, err := formatter.formatParameter(param)
@@ -141,7 +140,7 @@ func TestFormatParameterError(t *testing.T) {
 
 	param := v1alpha1.Parameter{
 		Name:  "PARAM_NAME",
-		Value: StringPointer("PARAM_PREFIX_[[uuid]]_SUFFIX"),
+		Value: v1alpha1.AnyStringPtr("PARAM_PREFIX_[[uuid]]_SUFFIX"),
 	}
 
 	result, err := formatter.formatParameter(param)
@@ -160,20 +159,24 @@ func TestFormatNothingToDoExceptAddUUID(t *testing.T) {
 		Spec: v1alpha1.WorkflowSpec{
 			Arguments: v1alpha1.Arguments{
 				Parameters: []v1alpha1.Parameter{
-					{Name: "param1", Value: StringPointer("value1")},
-					{Name: "param2", Value: StringPointer("value2")},
+					{Name: "param1", Value: v1alpha1.AnyStringPtr("value1")},
+					{Name: "param2", Value: v1alpha1.AnyStringPtr("value2")},
 				},
-			}}}
+			},
+		},
+	}
 
 	expected := &v1alpha1.Workflow{
 		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-name-"},
 		Spec: v1alpha1.WorkflowSpec{
 			Arguments: v1alpha1.Arguments{
 				Parameters: []v1alpha1.Parameter{
-					{Name: "param1", Value: StringPointer("value1")},
-					{Name: "param2", Value: StringPointer("value2")},
+					{Name: "param1", Value: v1alpha1.AnyStringPtr("value1")},
+					{Name: "param2", Value: v1alpha1.AnyStringPtr("value2")},
 				},
-			}}}
+			},
+		},
+	}
 
 	err := formatter.Format(workflow)
 	assert.Nil(t, err)
@@ -191,20 +194,24 @@ func TestFormatEverytingToChange(t *testing.T) {
 		Spec: v1alpha1.WorkflowSpec{
 			Arguments: v1alpha1.Arguments{
 				Parameters: []v1alpha1.Parameter{
-					{Name: "param1", Value: StringPointer("value1-[[schedule]]")},
-					{Name: "param2", Value: StringPointer("value2-[[now]]-suffix")},
+					{Name: "param1", Value: v1alpha1.AnyStringPtr("value1-[[schedule]]")},
+					{Name: "param2", Value: v1alpha1.AnyStringPtr("value2-[[now]]-suffix")},
 				},
-			}}}
+			},
+		},
+	}
 
 	expected := &v1alpha1.Workflow{
 		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-20170706050403-name-"},
 		Spec: v1alpha1.WorkflowSpec{
 			Arguments: v1alpha1.Arguments{
 				Parameters: []v1alpha1.Parameter{
-					{Name: "param1", Value: StringPointer("value1-20170706050403")},
-					{Name: "param2", Value: StringPointer("value2-20180807060504-suffix")},
+					{Name: "param1", Value: v1alpha1.AnyStringPtr("value1-20170706050403")},
+					{Name: "param2", Value: v1alpha1.AnyStringPtr("value2-20180807060504-suffix")},
 				},
-			}}}
+			},
+		},
+	}
 
 	err := formatter.Format(workflow)
 	assert.Nil(t, err)
@@ -218,10 +225,12 @@ func TestFormatOnlyWorkflowName(t *testing.T) {
 		getDefaultCreatedAtSec())
 
 	workflow := &v1alpha1.Workflow{
-		ObjectMeta: v1.ObjectMeta{Name: "workflow-[[schedule]]-name"}}
+		ObjectMeta: v1.ObjectMeta{Name: "workflow-[[schedule]]-name"},
+	}
 
 	expected := &v1alpha1.Workflow{
-		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-20170706050403-name-"}}
+		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-20170706050403-name-"},
+	}
 
 	err := formatter.Format(workflow)
 	assert.Nil(t, err)
@@ -235,10 +244,12 @@ func TestFormatOnlyWorkflowGeneratedName(t *testing.T) {
 		getDefaultCreatedAtSec())
 
 	workflow := &v1alpha1.Workflow{
-		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-[[schedule]]-name-"}}
+		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-[[schedule]]-name-"},
+	}
 
 	expected := &v1alpha1.Workflow{
-		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-20170706050403-name-"}}
+		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-20170706050403-name-"},
+	}
 
 	err := formatter.Format(workflow)
 	assert.Nil(t, err)
@@ -254,7 +265,8 @@ func TestFormatNoWorkflowNames(t *testing.T) {
 	workflow := &v1alpha1.Workflow{}
 
 	expected := &v1alpha1.Workflow{
-		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-"}}
+		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-"},
+	}
 
 	err := formatter.Format(workflow)
 	assert.Nil(t, err)
@@ -270,10 +282,13 @@ func TestFormat2WorkflowNames(t *testing.T) {
 	workflow := &v1alpha1.Workflow{
 		ObjectMeta: v1.ObjectMeta{
 			Name:         "workflow-[[schedule]]-name",
-			GenerateName: "workflow-[[schedule]]-generated-name-"}}
+			GenerateName: "workflow-[[schedule]]-generated-name-",
+		},
+	}
 
 	expected := &v1alpha1.Workflow{
-		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-20170706050403-generated-name-"}}
+		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-20170706050403-generated-name-"},
+	}
 
 	err := formatter.Format(workflow)
 	assert.Nil(t, err)
@@ -290,20 +305,24 @@ func TestFormatOnlyWorkflowParameters(t *testing.T) {
 		Spec: v1alpha1.WorkflowSpec{
 			Arguments: v1alpha1.Arguments{
 				Parameters: []v1alpha1.Parameter{
-					{Name: "param1", Value: StringPointer("value1-[[schedule]]")},
-					{Name: "param2", Value: StringPointer("value2-[[now]]-suffix")},
+					{Name: "param1", Value: v1alpha1.AnyStringPtr("value1-[[schedule]]")},
+					{Name: "param2", Value: v1alpha1.AnyStringPtr("value2-[[now]]-suffix")},
 				},
-			}}}
+			},
+		},
+	}
 
 	expected := &v1alpha1.Workflow{
 		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-"},
 		Spec: v1alpha1.WorkflowSpec{
 			Arguments: v1alpha1.Arguments{
 				Parameters: []v1alpha1.Parameter{
-					{Name: "param1", Value: StringPointer("value1-20170706050403")},
-					{Name: "param2", Value: StringPointer("value2-20180807060504-suffix")},
+					{Name: "param1", Value: v1alpha1.AnyStringPtr("value1-20170706050403")},
+					{Name: "param2", Value: v1alpha1.AnyStringPtr("value2-20180807060504-suffix")},
 				},
-			}}}
+			},
+		},
+	}
 
 	err := formatter.Format(workflow)
 	assert.Nil(t, err)
@@ -319,11 +338,26 @@ func TestFormatEmptyWorkflow(t *testing.T) {
 	workflow := &v1alpha1.Workflow{}
 
 	expected := &v1alpha1.Workflow{
-		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-"}}
+		ObjectMeta: v1.ObjectMeta{GenerateName: "workflow-"},
+	}
 
 	err := formatter.Format(workflow)
 	assert.Nil(t, err)
 	assert.Equal(t, expected, workflow)
+}
+
+func TestFormatNameError(t *testing.T) {
+	uuid := NewFakeUUIDGeneratorOrFatal(defaultUUID, errors.New("UUID generation failed"))
+	formatter := NewWorkflowFormatter(uuid,
+		getDefaultScheduledAtSec(),
+		getDefaultCreatedAtSec())
+
+	workflow := &v1alpha1.Workflow{
+		ObjectMeta: v1.ObjectMeta{Name: "workflow-[[uuid]]-name"},
+	}
+
+	err := formatter.Format(workflow)
+	assert.Contains(t, err.Error(), "UUID generation failed")
 }
 
 func TestFormatError(t *testing.T) {
@@ -337,10 +371,12 @@ func TestFormatError(t *testing.T) {
 		Spec: v1alpha1.WorkflowSpec{
 			Arguments: v1alpha1.Arguments{
 				Parameters: []v1alpha1.Parameter{
-					{Name: "param1", Value: StringPointer("value1-[[schedule]]-[[uuid]]")},
-					{Name: "param2", Value: StringPointer("value2-[[now]]-suffix")},
+					{Name: "param1", Value: v1alpha1.AnyStringPtr("value1-[[schedule]]-[[uuid]]")},
+					{Name: "param2", Value: v1alpha1.AnyStringPtr("value2-[[now]]-suffix")},
 				},
-			}}}
+			},
+		},
+	}
 
 	err := formatter.Format(workflow)
 	assert.Contains(t, err.Error(), "UUID generation failed")

@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,55 +14,89 @@
  * limitations under the License.
  */
 
-import * as React from 'react';
-
-import { shallow } from 'enzyme';
-import Banner, { css } from './Banner';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { vi } from 'vitest';
+import Banner from './Banner';
 
 describe('Banner', () => {
   it('defaults to error mode', () => {
-    const tree = shallow(<Banner message={'Some message'} />);
-    expect(tree).toMatchSnapshot();
+    const { asFragment } = render(<Banner message={'Some message'} />);
+    expect(asFragment()).toMatchSnapshot();
   });
 
   it('uses error mode when instructed', () => {
-    const tree = shallow(<Banner message={'Some message'} mode={'error'} />);
-    expect(tree).toMatchSnapshot();
+    const { asFragment } = render(<Banner message={'Some message'} mode={'error'} />);
+    expect(asFragment()).toMatchSnapshot();
   });
 
   it('uses warning mode when instructed', () => {
-    const tree = shallow(<Banner message={'Some message'} mode={'warning'} />);
-    expect(tree).toMatchSnapshot();
+    const { asFragment } = render(<Banner message={'Some message'} mode={'warning'} />);
+    expect(asFragment()).toMatchSnapshot();
+  });
+
+  it('uses info mode when instructed', () => {
+    const { asFragment } = render(<Banner message={'Some message'} mode={'info'} />);
+    expect(asFragment()).toMatchSnapshot();
   });
 
   it('shows "Details" button and has dialog when there is additional info', () => {
-    const tree = shallow(<Banner message={'Some message'} additionalInfo={'More info'} />);
-    expect(tree).toMatchSnapshot();
+    const { asFragment } = render(<Banner message={'Some message'} additionalInfo={'More info'} />);
+    expect(asFragment()).toMatchSnapshot();
   });
 
   it('shows "Refresh" button when passed a refresh function', () => {
-    const tree = shallow(<Banner message={'Some message'} refresh={() => { /* do nothing */}} />);
-    expect(tree).toMatchSnapshot();
+    const { asFragment } = render(
+      <Banner
+        message={'Some message'}
+        refresh={() => {
+          /* do nothing */
+        }}
+      />,
+    );
+    expect(asFragment()).toMatchSnapshot();
+  });
+
+  it('does not show "Refresh" button if mode is "info"', () => {
+    render(<Banner message={'Some message'} mode={'info'} refresh={() => undefined} />);
+    expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull();
+  });
+
+  it('shows troubleshooting link instructed by prop', () => {
+    render(<Banner message='Some message' mode='error' showTroubleshootingGuideLink={true} />);
+    expect(screen.getByRole('link', { name: 'Troubleshooting guide' })).toHaveAttribute(
+      'href',
+      'https://www.kubeflow.org/docs/pipelines/troubleshooting',
+    );
+  });
+
+  it('does not show troubleshooting link if warning', () => {
+    render(<Banner message='Some message' mode='warning' showTroubleshootingGuideLink={true} />);
+    expect(screen.queryByRole('link', { name: 'Troubleshooting guide' })).toBeNull();
   });
 
   it('opens details dialog when button is clicked', () => {
-    const tree = shallow(<Banner message='hello' additionalInfo='world' />);
-    tree.find('WithStyles(Button)').at(0).simulate('click');
-    expect(tree.state()).toHaveProperty('dialogOpen', true);
+    render(<Banner message='hello' additionalInfo='world' />);
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 
-  it('closes details dialog when cancel button is clicked', () => {
-    const tree = shallow(<Banner message='hello' additionalInfo='world' />);
-    tree.find('WithStyles(Button)').at(0).simulate('click');
-    expect(tree.state()).toHaveProperty('dialogOpen', true);
-    tree.find('#dismissDialogBtn').simulate('click');
-    expect(tree.state()).toHaveProperty('dialogOpen', false);
-  });
+  it('closes details dialog when cancel button is clicked', async () => {
+    render(<Banner message='hello' additionalInfo='world' />);
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    const dismissButton = screen.getByRole('button', { name: 'Dismiss' });
+    fireEvent.click(dismissButton);
+    await waitFor(
+      () => {
+        expect(screen.queryByRole('dialog')).toBeNull();
+      },
+      { timeout: 10000 },
+    );
+  }, 15000);
 
   it('calls refresh callback', () => {
-    const spy = jest.fn();
-    const tree = shallow(<Banner message='hello' refresh={spy} />);
-    tree.find('.' + css.refreshButton).at(0).simulate('click');
+    const spy = vi.fn();
+    render(<Banner message='hello' refresh={spy} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     expect(spy).toHaveBeenCalled();
   });
 });

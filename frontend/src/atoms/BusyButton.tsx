@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,9 +15,9 @@
  */
 
 import * as React from 'react';
-import Button, { ButtonProps } from '@material-ui/core/Button';
-import CircularProgress from '@material-ui/core/CircularProgress';
+import { ButtonProps } from '@mui/material/Button';
 import { stylesheet, classes } from 'typestyle';
+import { Button, CircularProgress } from '@mui/material';
 
 const css = stylesheet({
   icon: {
@@ -54,20 +54,23 @@ interface BusyButtonProps extends ButtonProps {
 }
 
 class BusyButton extends React.Component<BusyButtonProps> {
-  public render(): JSX.Element {
+  public render(): React.JSX.Element {
     const { title, busy, className, disabled, icon, outlined, ...rest } = this.props;
 
-    return <Button {...rest} color={outlined ? 'primary' : 'secondary'}
-      className={classes(
-        css.root,
-        busy && css.rootBusy,
-        className)}
-      disabled={busy || disabled}>
-      {!!icon && <this.props.icon className={css.icon} />}
-      <span>{title}</span>
-      {busy === true && <CircularProgress size={15}
-        className={classes(css.spinner, busy && css.spinnerBusy)} />}
-    </Button>;
+    return (
+      <Button
+        {...rest}
+        color={outlined ? 'primary' : 'secondary'}
+        className={classes(css.root, busy && css.rootBusy, className)}
+        disabled={busy || disabled}
+      >
+        {!!icon && <this.props.icon className={css.icon} />}
+        <span>{title}</span>
+        {busy === true && (
+          <CircularProgress size={15} className={classes(css.spinner, busy && css.spinnerBusy)} />
+        )}
+      </Button>
+    );
   }
 }
 

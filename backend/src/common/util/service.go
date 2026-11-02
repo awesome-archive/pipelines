@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,10 +15,16 @@
 package util
 
 import (
+	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/cenkalti/backoff"
 	"github.com/pkg/errors"
@@ -28,9 +34,13 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-func WaitForAPIAvailable(initializeTimeout time.Duration, basePath string, apiAddress string) error {
-	var operation = func() error {
-		response, err := http.Get(fmt.Sprintf("http://%s%s/healthz", apiAddress, basePath))
+func WaitForAPIAvailable(initializeTimeout time.Duration, healthURL string, httpClient *http.Client) error {
+	operation := func() error {
+		client := httpClient
+		if client == nil {
+			client = http.DefaultClient
+		}
+		response, err := client.Get(healthURL)
 		if err != nil {
 			return err
 		}
@@ -50,8 +60,29 @@ func WaitForAPIAvailable(initializeTimeout time.Duration, basePath string, apiAd
 	return errors.Wrapf(err, "Waiting for ml pipeline API server failed after all attempts.")
 }
 
+// GetKubernetesConfig will first try an in-cluster configuration but fallback to using a kubeconfig.
+func GetKubernetesConfig() (*rest.Config, error) {
+	restConfig, errInCluster := rest.InClusterConfig()
+	if errInCluster == nil {
+		return restConfig, nil
+	}
+
+	// Fallback to using a kubeconfig
+	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{},
+	)
+
+	restConfig, errKubeconfig := clientConfig.ClientConfig()
+	if errKubeconfig != nil {
+		return nil, fmt.Errorf("%w; %w", errInCluster, errKubeconfig)
+	}
+
+	return restConfig, nil
+}
+
 func GetKubernetesClientFromClientConfig(clientConfig clientcmd.ClientConfig) (
-	*kubernetes.Clientset, *rest.Config, string, error) {
+	*kubernetes.Clientset, *rest.Config, string, error,
+) {
 	// Get the clientConfig
 	config, err := clientConfig.ClientConfig()
 	if err != nil {
@@ -73,11 +104,54 @@ func GetKubernetesClientFromClientConfig(clientConfig clientcmd.ClientConfig) (
 	return clientSet, config, namespace, nil
 }
 
-func GetRpcConnection(address string) (*grpc.ClientConn, error) {
-	conn, err := grpc.Dial(address, grpc.WithInsecure())
+func GetRPCConnectionWithTimeout(address string, tlsCfg *tls.Config, timeout time.Time) (*grpc.ClientConn, error) {
+	creds := insecure.NewCredentials()
+	if tlsCfg != nil {
+		creds = credentials.NewTLS(tlsCfg)
+	}
+
+	ctx, cancel := context.WithDeadline(context.Background(), timeout)
+	defer cancel()
+
+	conn, err := grpc.NewClient(
+		address,
+		grpc.WithTransportCredentials(creds),
+	)
 	if err != nil {
 		return nil, errors.Wrapf(err, "Failed to create gRPC connection")
 	}
+	// Start connection attempts and wait until the connection is ready or the context deadline expires.
+	conn.Connect()
+	state := conn.GetState()
+	for state != connectivity.Ready {
+		if !conn.WaitForStateChange(ctx, state) {
+			_ = conn.Close()
+			if ctx.Err() != nil {
+				return nil, errors.Wrapf(ctx.Err(), "Timed out waiting for gRPC connection")
+			}
+			return nil, errors.New("Failed to connect to gRPC server")
+		}
+		state = conn.GetState()
+	}
+	return conn, nil
+}
+
+func GetRPCConnection(address string, tlsCfg *tls.Config) (*grpc.ClientConn, error) {
+	creds := insecure.NewCredentials()
+	if tlsCfg != nil {
+		creds = credentials.NewTLS(tlsCfg)
+	}
+
+	conn, err := grpc.NewClient(
+		address,
+		grpc.WithTransportCredentials(creds),
+	)
+	if err != nil {
+		return nil, errors.Wrapf(err, "Failed to create gRPC connection")
+	}
+	// NewClient does not support a blocking DialOption (grpc.WithBlock is deprecated and not applicable).
+	// Start connection attempts immediately without blocking to preserve eager dialing semantics.
+	conn.Connect()
 	return conn, nil
 }
 

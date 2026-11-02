@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC
+ * Copyright 2018 The Kubeflow Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,80 +14,167 @@
  * limitations under the License.
  */
 
-import WorkflowParser, { StoragePath } from './WorkflowParser';
-import { Apis } from '../lib/Apis';
+import { csvParseRows } from 'd3-dsv';
 import { ConfusionMatrixConfig } from '../components/viewers/ConfusionMatrix';
 import { HTMLViewerConfig } from '../components/viewers/HTMLViewer';
+import { MarkdownViewerConfig } from '../components/viewers/MarkdownViewer';
 import { PagedTableConfig } from '../components/viewers/PagedTable';
-import { PlotType, ViewerConfig } from '../components/viewers/Viewer';
 import { ROCCurveConfig } from '../components/viewers/ROCCurve';
 import { TensorboardViewerConfig } from '../components/viewers/Tensorboard';
-import { csvParseRows } from 'd3-dsv';
-import { logger, errorToMessage } from './Utils';
-
+import { PlotType, ViewerConfig } from '../components/viewers/Viewer';
+import { Apis } from '../lib/Apis';
+import { errorToMessage, logger } from './Utils';
+import { parseStoragePath, StoragePath } from './StoragePath';
+import { parseArtifactFileLocation } from './v2/ArtifactFileUtils';
 export interface PlotMetadata {
   format?: 'csv';
   header?: string[];
   labels?: string[];
   predicted_col?: string;
-  schema?: Array<{ type: string, name: string }>;
+  schema?: Array<{ type: string; name: string }>;
   source: string;
-  storage?: 'gcs';
+  storage?: 'gcs' | 'inline';
   target_col?: string;
+  pod_template_spec?: any; // only available for tensorboard
+  image?: string; // only available for tensorboard
   type: PlotType;
 }
+
+type PlotMetadataContent = Omit<PlotMetadata, 'type'>;
 
 export interface OutputMetadata {
   outputs: PlotMetadata[];
 }
 
-export class OutputArtifactLoader {
+export interface OutputArtifactLoadOptions {
+  artifactUriQuery?: string;
+  providerInfo?: string;
+  throwOnError?: boolean;
+}
 
-  public static async load(outputPath: StoragePath): Promise<ViewerConfig[]> {
+export interface OutputArtifactLoadResult {
+  configs: ViewerConfig[];
+  configKeys?: string[];
+  errors: string[];
+}
+
+type SourceContentGetter = (source: string, storage?: PlotMetadata['storage']) => Promise<string>;
+
+export class OutputArtifactLoader {
+  public static async load(
+    outputPath: StoragePath,
+    namespace?: string,
+    options: OutputArtifactLoadOptions = {},
+  ): Promise<ViewerConfig[]> {
+    const result = await this.loadResult(outputPath, namespace, options);
+    if (options.throwOnError && result.errors.length && !result.configs.length) {
+      throw new Error(result.errors.join('\n'));
+    }
+    return result.configs;
+  }
+
+  public static async loadResult(
+    outputPath: StoragePath,
+    namespace?: string,
+    options: OutputArtifactLoadOptions = {},
+  ): Promise<OutputArtifactLoadResult> {
     let plotMetadataList: PlotMetadata[] = [];
     try {
-      const metadataFile = await Apis.readFile(outputPath);
+      const metadataFile = await Apis.readFile({
+        path: outputPath,
+        namespace,
+        artifactUriQuery: options.artifactUriQuery,
+        providerInfo: options.providerInfo,
+      });
       if (metadataFile) {
         try {
-          plotMetadataList = (JSON.parse(metadataFile) as OutputMetadata).outputs;
-          if (plotMetadataList === undefined) {
-            throw new Error('"outputs" field required by not found on metadata file');
-          }
+          plotMetadataList = OutputArtifactLoader.parseOutputMetadataInJson(
+            metadataFile,
+            outputPath.key,
+          );
         } catch (e) {
-          logger.error(`Could not parse metadata file at: ${outputPath.key}. Error: ${e}`);
-          return [];
+          // This is a hack which only works on scenario for html/tensorboard, but not markdown.
+          // Because podTemplateSpec is escaped twice before writing to file. There are '\' before
+          // each `"` in podTemplateSpec.
+          // https://github.com/kubeflow/pipelines/issues/5830
+          const editMetadataFile = metadataFile.replace(/(\r\n|\n|\r|\\)/gm, '');
+          plotMetadataList = OutputArtifactLoader.parseOutputMetadataInJson(
+            editMetadataFile,
+            outputPath.key,
+          );
         }
       }
     } catch (err) {
       const errorMessage = await errorToMessage(err);
       logger.error('Error loading run outputs:', errorMessage);
-      // TODO: error dialog
+      if (options.throwOnError) {
+        throw err;
+      }
     }
 
-    const configs: Array<ViewerConfig | null> = await Promise.all(
-      plotMetadataList.map(async metadata => {
+    const getSourceContent: SourceContentGetter = async (source, storage) =>
+      await readSourceContent(source, storage, namespace);
+
+    const results = await Promise.allSettled(
+      plotMetadataList.map(async (metadata) => {
         switch (metadata.type) {
-          case (PlotType.CONFUSION_MATRIX):
-            return await this.buildConfusionMatrixConfig(metadata);
-          case (PlotType.TABLE):
-            return await this.buildPagedTableConfig(metadata);
-          case (PlotType.TENSORBOARD):
-            return await this.buildTensorboardConfig(metadata);
-          case (PlotType.WEB_APP):
-            return await this.buildHtmlViewerConfig(metadata);
-          case (PlotType.ROC):
-            return await this.buildRocCurveConfig(metadata);
+          case PlotType.CONFUSION_MATRIX:
+            return await this.buildConfusionMatrixConfig(metadata, getSourceContent);
+          case PlotType.MARKDOWN:
+            return await this.buildMarkdownViewerConfig(metadata, getSourceContent);
+          case PlotType.TABLE:
+            return await this.buildPagedTableConfig(metadata, getSourceContent);
+          case PlotType.TENSORBOARD:
+            return await this.buildTensorboardConfig(metadata, namespace);
+          case PlotType.WEB_APP:
+            return await this.buildHtmlViewerConfig(metadata, getSourceContent);
+          case PlotType.ROC:
+            return await this.buildRocCurveConfig(metadata, getSourceContent);
           default:
             logger.error('Unknown plot type: ' + metadata.type);
             return null;
         }
-      })
+      }),
     );
 
-    return configs.filter(c => !!c) as ViewerConfig[];
+    const configs: ViewerConfig[] = [];
+    const configKeys: string[] = [];
+    const errors: string[] = [];
+    for (const [index, result] of results.entries()) {
+      if (result.status === 'fulfilled') {
+        if (result.value) {
+          configs.push(result.value);
+          // The metadata slot identifies a viewer independently of mutable source content. This
+          // lets recovered data update an existing viewer without transferring its local UI state
+          // to a sibling that happened to complete earlier.
+          configKeys.push(`metadata-${index}`);
+        }
+      } else {
+        const message = await errorToMessage(result.reason);
+        logger.error('Error loading run output:', message);
+        errors.push(message);
+      }
+    }
+    return { configs, configKeys, errors };
   }
 
-  public static async buildConfusionMatrixConfig(metadata: PlotMetadata): Promise<ConfusionMatrixConfig> {
+  private static parseOutputMetadataInJson(fileContent: string, key: string): PlotMetadata[] {
+    try {
+      const plotMetadataList = (JSON.parse(fileContent) as OutputMetadata).outputs;
+      if (plotMetadataList === undefined) {
+        throw new Error('"outputs" field required by not found on metadata file');
+      }
+      return plotMetadataList;
+    } catch (e) {
+      logger.error(`Could not parse metadata file at: ${key}. Error: ${e}`);
+      throw new Error(`Could not parse metadata file at: ${key}. Error: ${e}`, { cause: e });
+    }
+  }
+
+  public static async buildConfusionMatrixConfig(
+    metadata: PlotMetadataContent,
+    getSourceContent: SourceContentGetter,
+  ): Promise<ConfusionMatrixConfig> {
     if (!metadata.source) {
       throw new Error('Malformed metadata, property "source" is required.');
     }
@@ -101,8 +188,8 @@ export class OutputArtifactLoader {
       throw new Error('"schema" must be an array of {"name": string, "type": string} objects');
     }
 
-    const path = WorkflowParser.parseStoragePath(metadata.source);
-    const csvRows = csvParseRows((await Apis.readFile(path)).trim());
+    const content = await getSourceContent(metadata.source, metadata.storage);
+    const csvRows = csvParseRows(content.trim());
     const labels = metadata.labels;
     const labelIndex: { [label: string]: number } = {};
     let index = 0;
@@ -112,13 +199,15 @@ export class OutputArtifactLoader {
 
     if (labels.length ** 2 !== csvRows.length) {
       throw new Error(
-        `Data dimensions ${csvRows.length} do not match the number of labels passed ${labels.length}`);
+        `Data dimensions ${csvRows.length} do not match the number of labels passed ${labels.length}`,
+      );
     }
 
     const data = Array.from(Array(labels.length), () => new Array(labels.length));
-    csvRows.forEach(([target, predicted, count]) => {
-      const i = labelIndex[target.trim()];
-      const j = labelIndex[predicted.trim()];
+    csvRows.forEach(([labelX, labelY, count]) => {
+      const i = labelIndex[labelX.trim()];
+      const j = labelIndex[labelY.trim()];
+      // Note: data[i][j] means data(i, j) i on x-axis, j on y-axis
       data[i][j] = Number.parseInt(count, 10);
     });
 
@@ -138,7 +227,10 @@ export class OutputArtifactLoader {
     };
   }
 
-  public static async buildPagedTableConfig(metadata: PlotMetadata): Promise<PagedTableConfig> {
+  public static async buildPagedTableConfig(
+    metadata: PlotMetadataContent,
+    getSourceContent: SourceContentGetter,
+  ): Promise<PagedTableConfig> {
     if (!metadata.source) {
       throw new Error('Malformed metadata, property "source" is required.');
     }
@@ -148,13 +240,13 @@ export class OutputArtifactLoader {
     if (!metadata.format) {
       throw new Error('Malformed metadata, property "format" is required.');
     }
-    let data: string[][] = [];
+    let data: string[][];
     const labels = metadata.header || [];
+    const content = await getSourceContent(metadata.source, metadata.storage);
 
     switch (metadata.format) {
       case 'csv':
-        const path = WorkflowParser.parseStoragePath(metadata.source);
-        data = csvParseRows((await Apis.readFile(path)).trim()).map(r => r.map(c => c.trim()));
+        data = csvParseRows(content.trim()).map((r) => r.map((c) => c.trim()));
         break;
       default:
         throw new Error('Unsupported table format: ' + metadata.format);
@@ -167,31 +259,54 @@ export class OutputArtifactLoader {
     };
   }
 
-  public static async buildTensorboardConfig(metadata: PlotMetadata): Promise<TensorboardViewerConfig> {
+  public static async buildTensorboardConfig(
+    metadata: PlotMetadataContent,
+    namespace?: string,
+  ): Promise<TensorboardViewerConfig> {
     if (!metadata.source) {
       throw new Error('Malformed metadata, property "source" is required.');
     }
-    WorkflowParser.parseStoragePath(metadata.source);
+    parseStoragePath(metadata.source);
     return {
       type: PlotType.TENSORBOARD,
       url: metadata.source,
+      // The server resolves an omitted namespace only for standalone installs.
+      namespace: namespace || '',
+      podTemplateSpec: metadata.pod_template_spec,
+      image: metadata.image,
     };
   }
 
-  public static async buildHtmlViewerConfig(metadata: PlotMetadata): Promise<HTMLViewerConfig> {
+  public static async buildHtmlViewerConfig(
+    metadata: PlotMetadataContent,
+    getSourceContent: SourceContentGetter,
+  ): Promise<HTMLViewerConfig> {
     if (!metadata.source) {
       throw new Error('Malformed metadata, property "source" is required.');
     }
-    const path = WorkflowParser.parseStoragePath(metadata.source);
-    const htmlContent = await Apis.readFile(path);
-
     return {
-      htmlContent,
+      htmlContent: await getSourceContent(metadata.source, metadata.storage),
       type: PlotType.WEB_APP,
     };
   }
 
-  public static async buildRocCurveConfig(metadata: PlotMetadata): Promise<ROCCurveConfig> {
+  public static async buildMarkdownViewerConfig(
+    metadata: PlotMetadataContent,
+    getSourceContent: SourceContentGetter,
+  ): Promise<MarkdownViewerConfig> {
+    if (!metadata.source) {
+      throw new Error('Malformed metadata, property "source" is required.');
+    }
+    return {
+      markdownContent: await getSourceContent(metadata.source, metadata.storage),
+      type: PlotType.MARKDOWN,
+    };
+  }
+
+  public static async buildRocCurveConfig(
+    metadata: PlotMetadataContent,
+    getSourceContent: SourceContentGetter,
+  ): Promise<ROCCurveConfig> {
     if (!metadata.source) {
       throw new Error('Malformed metadata, property "source" is required.');
     }
@@ -202,23 +317,23 @@ export class OutputArtifactLoader {
       throw new Error('Malformed schema, must be an array of {"name": string, "type": string}');
     }
 
-    const path = WorkflowParser.parseStoragePath(metadata.source);
-    const stringData = csvParseRows((await Apis.readFile(path)).trim());
+    const content = await getSourceContent(metadata.source, metadata.storage);
+    const stringData = csvParseRows(content.trim());
 
-    const fprIndex = metadata.schema.findIndex(field => field.name === 'fpr');
+    const fprIndex = metadata.schema.findIndex((field) => field.name === 'fpr');
     if (fprIndex === -1) {
       throw new Error('Malformed schema, expected to find a column named "fpr"');
     }
-    const tprIndex = metadata.schema.findIndex(field => field.name === 'tpr');
+    const tprIndex = metadata.schema.findIndex((field) => field.name === 'tpr');
     if (tprIndex === -1) {
       throw new Error('Malformed schema, expected to find a column named "tpr"');
     }
-    const thresholdIndex = metadata.schema.findIndex(field => field.name.startsWith('threshold'));
+    const thresholdIndex = metadata.schema.findIndex((field) => field.name.startsWith('threshold'));
     if (thresholdIndex === -1) {
       throw new Error('Malformed schema, expected to find a column named "threshold"');
     }
 
-    const dataset = stringData.map(row => ({
+    const dataset = stringData.map((row) => ({
       label: row[thresholdIndex].trim(),
       x: +row[fprIndex],
       y: +row[tprIndex],
@@ -230,3 +345,23 @@ export class OutputArtifactLoader {
     };
   }
 }
+
+async function readSourceContent(
+  source: PlotMetadata['source'],
+  storage: PlotMetadata['storage'] | undefined,
+  namespace: string | undefined,
+): Promise<string> {
+  if (storage === 'inline') {
+    return source;
+  }
+  const location = parseArtifactFileLocation(source);
+  return await Apis.readFile({
+    path: location.path,
+    namespace,
+    artifactUriQuery: location.artifactUriQuery,
+  });
+}
+
+export const TEST_ONLY = {
+  readSourceContent,
+};

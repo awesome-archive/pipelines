@@ -1,0 +1,161 @@
+# Copyright 2024 The Kubeflow Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Pipeline-level config options."""
+
+from typing import Any, Dict, Optional
+
+from kfp.dsl import utils
+
+
+class KubernetesWorkspaceConfig:
+    """Configuration for Kubernetes-specific workspace settings.
+
+    Use this to override the default PersistentVolumeClaim (PVC) configuration
+    used when running pipelines on a Kubernetes cluster.
+
+    Attributes:
+        pvcSpecPatch: A dictionary of fields to patch onto the default PVC spec
+                      (e.g., 'storageClassName', 'accessModes').
+    """
+
+    def __init__(self, pvcSpecPatch: Optional[Dict[str, Any]] = None):
+        self.pvcSpecPatch = pvcSpecPatch or {}
+
+    def set_pvcSpecPatch(self, patch: Dict[str, Any]):
+        self.pvcSpecPatch = patch
+
+
+class WorkspaceConfig:
+    """Configuration for a shared workspace that persists during the pipeline
+    run.
+
+    Attributes:
+        kubernetes: (Optional) Kubernetes-specific configuration for the underlying PVC.
+    """
+
+    def __init__(
+        self, size: str, kubernetes: Optional[KubernetesWorkspaceConfig] = None
+    ):
+        self.size = size
+        self.kubernetes = kubernetes or KubernetesWorkspaceConfig()
+
+    @property
+    def size(self) -> str:
+        """The size of the workspace (e.g., ``'250Gi'``). This is a required
+        field.
+
+        See the
+        `Kubernetes quantity documentation <https://kubernetes.io/docs/reference/kubernetes-api/common-definitions/quantity/>`_
+        for valid quantity formats.
+        """
+        return self._size
+
+    @size.setter
+    def size(self, size: str) -> None:
+        if not size or not str(size).strip():
+            raise ValueError('Workspace size is required and cannot be empty')
+        normalized = utils.normalize_resource_quantity(str(size).strip())
+        if normalized is None:
+            raise ValueError(
+                f'Workspace size "{size}" is invalid. Must be a valid Kubernetes resource quantity '
+                '(e.g., "10Gi", "500Mi", "1Ti")'
+            )
+        self._size = normalized
+
+    def get_workspace(self) -> dict:
+        workspace = {'size': self.size}
+        if self.kubernetes:
+            workspace['kubernetes'] = {
+                'pvcSpecPatch': self.kubernetes.pvcSpecPatch
+            }
+        return workspace
+
+    def set_size(self, size: str):
+        self.size = size
+
+    def set_kubernetes_config(
+        self, kubernetes_config: KubernetesWorkspaceConfig
+    ):
+        self.kubernetes = kubernetes_config
+
+
+class PipelineConfig:
+    """PipelineConfig contains pipeline-level config options.
+
+    Attributes:
+        workspace: Optional configuration for a shared workspace PVC that
+            persists for the duration of the pipeline run.
+        ttl_seconds_after_finished: Optional number of seconds to retain the
+            Argo Workflow resource after the pipeline run completes, regardless
+            of success or failure.  Maps to Argo's
+            ``ttlStrategy.secondsAfterCompletion``.  When ``None`` (the
+            default) no completion TTL is set.
+        ttl_seconds_after_success: Optional number of seconds to retain the
+            Argo Workflow resource after a *successful* run.  Maps to Argo's
+            ``ttlStrategy.secondsAfterSuccess``.  Takes precedence over
+            ``ttl_seconds_after_finished`` for successful runs when both are
+            set.
+        ttl_seconds_after_failure: Optional number of seconds to retain the
+            Argo Workflow resource after a *failed* run.  Maps to Argo's
+            ``ttlStrategy.secondsAfterFailure``.  Takes precedence over
+            ``ttl_seconds_after_finished`` for failed runs when both are set.
+        active_deadline_seconds: Optional maximum number of seconds a
+            workflow is allowed to run before it is forcibly terminated.
+            Maps to Argo's ``activeDeadlineSeconds``.  When ``None`` (the
+            default) no deadline is applied.
+        artifact_previews: Whether supported Python components automatically
+            preview their Dataset and Model outputs. Defaults to ``True``.
+            Set to ``False`` to disable generation throughout this pipeline,
+            including nested pipelines and exit handlers. Component opt-outs
+            remain effective when the pipeline enables previews.
+    """
+
+    def __init__(
+        self,
+        workspace: Optional[WorkspaceConfig] = None,
+        ttl_seconds_after_finished: Optional[int] = None,
+        ttl_seconds_after_success: Optional[int] = None,
+        ttl_seconds_after_failure: Optional[int] = None,
+        active_deadline_seconds: Optional[int] = None,
+        artifact_previews: bool = True,
+    ):
+        if not isinstance(artifact_previews, bool):
+            raise TypeError('artifact_previews must be a bool.')
+        self.artifact_previews = artifact_previews
+        self.workspace = workspace
+        for name, value in [
+            ('ttl_seconds_after_finished', ttl_seconds_after_finished),
+            ('ttl_seconds_after_success', ttl_seconds_after_success),
+            ('ttl_seconds_after_failure', ttl_seconds_after_failure),
+            ('active_deadline_seconds', active_deadline_seconds),
+        ]:
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(
+                    f'{name} must be an int. Got: {type(value).__name__}'
+                )
+            if value < 0:
+                raise ValueError(
+                    f'{name} must be a non-negative integer. Got: {value}'
+                )
+            if value > 2147483647:
+                raise ValueError(
+                    f'{name} must not exceed the int32 maximum (2147483647).'
+                    f' Got: {value}'
+                )
+        self.ttl_seconds_after_finished = ttl_seconds_after_finished
+        self.ttl_seconds_after_success = ttl_seconds_after_success
+        self.ttl_seconds_after_failure = ttl_seconds_after_failure
+        self.active_deadline_seconds = active_deadline_seconds

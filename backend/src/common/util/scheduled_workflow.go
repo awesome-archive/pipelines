@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,10 +15,25 @@
 package util
 
 import (
-	workflowapi "github.com/argoproj/argo/pkg/apis/workflow/v1alpha1"
+	"strings"
+
 	"github.com/golang/glog"
 	swfapi "github.com/kubeflow/pipelines/backend/src/crd/pkg/apis/scheduledworkflow/v1beta1"
+	"google.golang.org/protobuf/types/known/structpb"
 	"k8s.io/apimachinery/pkg/util/json"
+)
+
+type ScheduledWorkflowType string
+
+const (
+	SWFv1      ScheduledWorkflowType = "v1beta1"
+	SWFv2      ScheduledWorkflowType = "v2beta1"
+	SWFlegacy  ScheduledWorkflowType = "legacy"
+	SWFunknown ScheduledWorkflowType = "Unknown"
+
+	ApiVersionV1 = "kubeflow.org/v1beta1"
+	ApiVersionV2 = "kubeflow.org/v2beta1"
+	SwfKind      = "ScheduledWorkflow"
 )
 
 // ScheduledWorkflow is a type to help manipulate ScheduledWorkflow objects.
@@ -80,6 +95,13 @@ func (s *ScheduledWorkflow) MaxConcurrencyOr0() int64 {
 	return 0
 }
 
+func (s *ScheduledWorkflow) NoCatchupOrFalse() bool {
+	if s.Spec.NoCatchup != nil {
+		return *s.Spec.NoCatchup
+	}
+	return false
+}
+
 func (s *ScheduledWorkflow) IntervalSecondOr0() int64 {
 	if s.Spec.PeriodicSchedule != nil {
 		return s.Spec.PeriodicSchedule.IntervalSecond
@@ -96,21 +118,28 @@ func (s *ScheduledWorkflow) ConditionSummary() string {
 }
 
 func (s *ScheduledWorkflow) ParametersAsString() (string, error) {
-	workflowParams := make([]workflowapi.Parameter, 0)
-
-	var params []swfapi.Parameter
+	var params interface{}
 	if s.ScheduledWorkflow.Spec.Workflow == nil {
-		params = make([]swfapi.Parameter, 0)
-	} else {
-		params = s.ScheduledWorkflow.Spec.Workflow.Parameters
+		return "", nil
 	}
-
-	for _, param := range params {
-		workflowParam := workflowapi.Parameter{
-			Name:  param.Name,
-			Value: &param.Value,
+	switch s.GetVersion() {
+	case SWFv1:
+		params = s.ScheduledWorkflow.Spec.Workflow.Parameters
+	case SWFv2:
+		paramsMap := make(map[string]*structpb.Value, 0)
+		for _, param := range s.ScheduledWorkflow.Spec.Workflow.Parameters {
+			var protoValue structpb.Value
+			err := json.Unmarshal([]byte(param.Value), &protoValue)
+			if err != nil {
+				return "", err
+			}
+			paramsMap[param.Name] = &protoValue
 		}
-		workflowParams = append(workflowParams, workflowParam)
+		params = paramsMap
+	case SWFlegacy:
+		return "", NewInvalidInputError("Found a ScheduledWorkflow with empty type metadata. ScheduledWorkflow must have valid APIVersion and Kind. ObjectMeta: %v", s.ObjectMeta)
+	default:
+		return "", NewInternalServerError(NewInvalidInputError("ScheduledWorkflow has invalid type metadata: %v", s.TypeMeta), "Failed to serialize parameters as string for ScheduledWorkflow %v", s.ObjectMeta)
 	}
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
@@ -128,4 +157,15 @@ func (s *ScheduledWorkflow) ToStringForStore() string {
 		return ""
 	}
 	return string(swf)
+}
+
+func (s *ScheduledWorkflow) GetVersion() ScheduledWorkflowType {
+	if strings.HasPrefix(s.APIVersion, ApiVersionV1) && s.Kind == SwfKind {
+		return SWFv1
+	} else if strings.HasPrefix(s.APIVersion, ApiVersionV2) && s.Kind == SwfKind {
+		return SWFv2
+	} else if s.APIVersion == "" && s.Kind == "" {
+		return SWFlegacy
+	}
+	return SWFunknown
 }

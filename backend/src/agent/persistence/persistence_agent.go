@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,8 +18,7 @@ import (
 	"fmt"
 	"time"
 
-	workflowregister "github.com/argoproj/argo/pkg/apis/workflow"
-	workflowinformers "github.com/argoproj/argo/pkg/client/informers/externalversions"
+	workflowregister "github.com/argoproj/argo-workflows/v4/pkg/apis/workflow"
 	"github.com/kubeflow/pipelines/backend/src/agent/persistence/client"
 	"github.com/kubeflow/pipelines/backend/src/agent/persistence/worker"
 	"github.com/kubeflow/pipelines/backend/src/common/util"
@@ -43,28 +42,41 @@ type PersistenceAgent struct {
 }
 
 // NewPersistenceAgent returns a new persistence agent.
+// imagePullFailureChecker is optional (may be nil) and enables detection and
+// termination of workflows with pods stuck in ImagePullBackOff/ErrImagePull.
 func NewPersistenceAgent(
 	swfInformerFactory swfinformers.SharedInformerFactory,
-	workflowInformerFactory workflowinformers.SharedInformerFactory,
+	execInformer util.ExecutionInformer,
 	pipelineClient *client.PipelineClient,
-	time util.TimeInterface) *PersistenceAgent {
+	time util.TimeInterface,
+	imagePullFailureChecker worker.ImagePullFailureChecker,
+) (*PersistenceAgent, error) {
 	// obtain references to shared informers
 	swfInformer := swfInformerFactory.Scheduledworkflow().V1beta1().ScheduledWorkflows()
-	workflowInformer := workflowInformerFactory.Argoproj().V1alpha1().Workflows()
 
 	// Add controller types to the default Kubernetes Scheme so Events can be
 	// logged for controller types.
 	swfScheme.AddToScheme(scheme.Scheme)
 
 	swfClient := client.NewScheduledWorkflowClient(swfInformer)
-	workflowClient := client.NewWorkflowClient(workflowInformer)
+	workflowClient := client.NewWorkflowClient(execInformer)
 
-	swfWorker := worker.NewPersistenceWorker(time, swfregister.Kind, swfInformer.Informer(), true,
+	swfWorker, err := worker.NewPersistenceWorker(time, swfregister.Kind, swfInformer.Informer(), true,
 		worker.NewScheduledWorkflowSaver(swfClient, pipelineClient))
+	if err != nil {
+		return nil, err
+	}
 
-	workflowWorker := worker.NewPersistenceWorker(time, workflowregister.Kind,
-		workflowInformer.Informer(), true,
-		worker.NewWorkflowSaver(workflowClient, pipelineClient))
+	workflowSaver := worker.NewWorkflowSaver(workflowClient, pipelineClient, ttlSecondsAfterWorkflowFinish)
+	if imagePullFailureChecker != nil {
+		workflowSaver.SetImagePullFailureChecker(imagePullFailureChecker)
+	}
+
+	workflowWorker, err := worker.NewPersistenceWorker(time, workflowregister.WorkflowKind,
+		execInformer, true, workflowSaver)
+	if err != nil {
+		return nil, err
+	}
 
 	agent := &PersistenceAgent{
 		swfClient:      swfClient,
@@ -75,7 +87,7 @@ func NewPersistenceAgent(
 
 	log.Info("Setting up event handlers")
 
-	return agent
+	return agent, nil
 }
 
 // Run will set up the event handlers for types we are interested in, as well

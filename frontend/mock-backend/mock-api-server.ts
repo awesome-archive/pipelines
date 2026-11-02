@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,22 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import * as express from 'express';
-import mockApiMiddleware from './mock-api-middleware';
+import { createMockApiApp } from './mock-api-app';
 
-const app = express();
 const port = process.argv[2] || 3001;
-
-app.use((_, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'X-Requested-With, content-type');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
-  next();
-});
-
-mockApiMiddleware(app as any);
-
-app.listen(port, () => {
+createMockApiApp().listen(port, () => {
   // tslint:disable-next-line:no-console
   console.log('Server listening at http://localhost:' + port);
 });

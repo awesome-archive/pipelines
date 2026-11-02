@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,25 +14,70 @@
 
 package model
 
-import "github.com/kubeflow/pipelines/backend/src/apiserver/common"
+const (
+	NamespaceResourceType       ResourceType = "Namespace"
+	ExperimentResourceType      ResourceType = "Experiment"
+	JobResourceType             ResourceType = "Job"
+	RecurringRunResourceType    ResourceType = "RecurringRun"
+	RunResourceType             ResourceType = "Run"
+	PipelineResourceType        ResourceType = "pipeline"
+	PipelineVersionResourceType ResourceType = "PipelineVersion"
+	ArtifactResourceType        ResourceType = "Artifact"
+	TaskResourceType            ResourceType = "Task"
+)
 
-// Resource reference table models the relationship between resources in a loosely coupled way.
+const (
+	OwnerRelationship   Relationship = "Owner"
+	CreatorRelationship Relationship = "Creator"
+)
+
+// ResourceType The type of a resource object.
+type ResourceType string
+
+// Relationship The relationship between two resource objects.
+type Relationship string
+
+// ResourceReference Resource reference table models the relationship between resources in a loosely coupled way.
+// This model has a composite primary key consisting of ResourceUUID, ResourceType, and ReferenceType.
 type ResourceReference struct {
 	// ID of the resource object
-	ResourceUUID string `gorm:"column:ResourceUUID; not null; primary_key"`
+	ResourceUUID string `gorm:"column:ResourceUUID; not null; primaryKey; type:varchar(191);"`
 
 	// The type of the resource object
-	ResourceType common.ResourceType `gorm:"column:ResourceType; not null; primary_key"`
+	ResourceType ResourceType `gorm:"column:ResourceType; not null; primaryKey; index:referencefilter;"`
 
-	// The ID of the resource that been referenced to.
-	ReferenceUUID string `gorm:"column:ReferenceUUID; not null; "`
+	// The ID of the referenced resource.
+	ReferenceUUID string `gorm:"column:ReferenceUUID; not null; index:referencefilter; type:varchar(191);"`
 
-	// The type of the resource that been referenced to.
-	ReferenceType common.ResourceType `gorm:"column:ReferenceType; not null; primary_key"`
+	// The name of the referenced resource.
+	ReferenceName string `gorm:"column:ReferenceName; not null;"`
 
-	// The relationship between the resource object and the resource that been referenced to.
-	Relationship common.Relationship `gorm:"column:Relationship; not null; "`
+	// The type of the referenced resource.
+	ReferenceType ResourceType `gorm:"column:ReferenceType; not null; primaryKey; index:referencefilter;"`
 
-	// The json formatted blob of the resource reference.
-	Payload string `gorm:"column:Payload; not null; "`
+	// The relationship between the resource object and the referenced resource.
+	Relationship Relationship `gorm:"column:Relationship; not null;"`
+
+	// JSON-encoded metadata blob about the reference
+	Payload LargeText `gorm:"column:Payload; not null;"`
+}
+
+type ReferenceKey struct {
+	Type ResourceType
+	ID   string
+}
+
+type FilterContext struct {
+	// Filter by a specific reference key
+	*ReferenceKey
+}
+
+// GetRefIdFromResourceReferences fetches the first reference id of a given type
+func GetRefIdFromResourceReferences(resRefs []*ResourceReference, refType ResourceType) string {
+	for _, ref := range resRefs {
+		if ref.ReferenceUUID != "" && ref.ReferenceType == refType {
+			return ref.ReferenceUUID
+		}
+	}
+	return ""
 }

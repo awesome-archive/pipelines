@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The Kubeflow Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,45 +15,44 @@
 package client
 
 import (
-	"github.com/argoproj/argo/pkg/client/informers/externalversions/workflow/v1alpha1"
 	"github.com/kubeflow/pipelines/backend/src/common/util"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"k8s.io/client-go/tools/cache"
 )
 
 type WorkflowClientInterface interface {
-	Get(namespace string, name string) (wf *util.Workflow, err error)
+	Get(namespace string, name string) (wf util.ExecutionSpec, err error)
 }
 
 // WorkflowClient is a client to call the Workflow API.
 type WorkflowClient struct {
-	informer v1alpha1.WorkflowInformer
+	informer util.ExecutionInformer
 }
 
 // NewWorkflowClient creates an instance of the WorkflowClient.
-func NewWorkflowClient(informer v1alpha1.WorkflowInformer) *WorkflowClient {
+func NewWorkflowClient(informer util.ExecutionInformer) *WorkflowClient {
 	return &WorkflowClient{
 		informer: informer,
 	}
 }
 
 // AddEventHandler adds an event handler.
-func (c *WorkflowClient) AddEventHandler(funcs *cache.ResourceEventHandlerFuncs) {
-	c.informer.Informer().AddEventHandler(funcs)
+func (c *WorkflowClient) AddEventHandler(funcs *cache.ResourceEventHandlerFuncs) (cache.ResourceEventHandlerRegistration, error) {
+	return c.informer.AddEventHandler(funcs)
 }
 
 // HasSynced returns true if the shared informer's store has synced.
 func (c *WorkflowClient) HasSynced() func() bool {
-	return c.informer.Informer().HasSynced
+	return c.informer.HasSynced()
 }
 
 // Get returns a Workflow, given a namespace and name.
 func (c *WorkflowClient) Get(namespace string, name string) (
-	wf *util.Workflow, err error) {
-	workflow, err := c.informer.Lister().Workflows(namespace).Get(name)
-	if err != nil {
+	wf util.ExecutionSpec, err error) {
+	workflow, notfound, err := c.informer.Get(namespace, name)
+	if err != nil || notfound {
 		var code util.CustomCode
-		if util.IsNotFound(err) {
+		if notfound {
 			code = util.CUSTOM_CODE_NOT_FOUND
 		} else {
 			code = util.CUSTOM_CODE_GENERIC
@@ -61,5 +60,5 @@ func (c *WorkflowClient) Get(namespace string, name string) (
 		return nil, util.NewCustomError(err, code,
 			"Error retrieving workflow (%v) in namespace (%v): %v", name, namespace, err)
 	}
-	return util.NewWorkflow(workflow), nil
+	return workflow, nil
 }

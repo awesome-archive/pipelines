@@ -1,25 +1,44 @@
-# Copyright 2018 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
-all: build
+# Regenerate all generated files and golden test files
+.PHONY: regenerate-all
+regenerate-all:
+	@echo "==> Regenerating K8s Native API CRDs..."
+	cd backend/src/crd/kubernetes && $(MAKE) generate manifests
+	@echo "==> Regenerating backend proto code (v2)..."
+	cd backend/api && API_VERSION=v2 $(MAKE) generate
+	@echo "==> Regenerating kfp-server-api-package (v2)..."
+	cd backend/api && API_VERSION=v2 $(MAKE) generate-kfp-server-api-package
+	@echo "==> Updating proto test golden files..."
+	cd backend/test/proto_tests && UPDATE_EXPECTED=true go test .
+	@echo "==> Updating compiler test golden files..."
+	cd backend/test/compiler && go test . -updateCompiledFiles
+	@echo "==> All files regenerated successfully!"
 
-build:
-  # Create vendor directories with all dependencies.
-	go mod vendor
-	# Extract go licenses into a single file. This assume licext is install globally through
-	# npm install -g license-extractor
-	# See https://github.com/arei/license-extractor
-	licext --mode merge --source vendor/ --target third_party/license.txt --overwrite
-	# Delete vendor directory
-	rm -rf vendor
+# Check diff for generated files. Changes confined to the generator version
+# comment that protoc-gen-go and protoc-gen-go-grpc stamp into their output are
+# reported and allowed, because those versions come from the Go module manifests
+# and so change on any module bump without the generated code differing.
+.PHONY: check-diff
+check-diff:
+	python3 .github/resources/scripts/check_generated_diff.py
+
+.PHONY: check-go-version
+check-go-version:
+	python3 .github/resources/scripts/update_go_version.py --check
+
+.PHONY: update-go-version
+update-go-version:
+	@if [ -z "$(GO_VERSION)" ]; then \
+		echo "GO_VERSION is required; run make update-go-version GO_VERSION=1.X.Y" >&2; \
+		exit 2; \
+	fi
+	python3 .github/resources/scripts/update_go_version.py --version "$(GO_VERSION)"
+
+# Tools
+BIN_DIR ?= $(CURDIR)/bin
+
+.PHONY: ginkgo
+ginkgo:
+	mkdir -p $(BIN_DIR)
+	GOBIN=$(BIN_DIR) go install github.com/onsi/ginkgo/v2/ginkgo@latest
+	@echo "Ginkgo installed to $(BIN_DIR)/ginkgo"
